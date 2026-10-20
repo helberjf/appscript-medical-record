@@ -277,11 +277,11 @@ function preencherMarcador(corpo, chave, valor) {
  * Linhas em branco no fim do bloco ficam, para manter o espaçamento. Devolve false se o bloco não existe.
  * estiloNovas: estilo das linhas novas quando o bloco do modelo não tem nenhuma linha de conteúdo para copiar.
  */
-function substituirBloco(corpo, reInicio, reParada, linhas, estiloNovas) {
+function substituirBloco(corpo, reInicio, reParada, linhas, estiloNovas, aPartir) {
   var total = corpo.getNumChildren();
   var inicio = -1;
   var m = null;
-  for (var i = 0; i < total; i++) {
+  for (var i = aPartir || 0; i < total; i++) {
     var elemento = corpo.getChild(i);
     if (!ehParagrafo(elemento)) continue;
     m = elemento.getText().trim().match(reInicio);
@@ -337,23 +337,159 @@ function encontrarParagrafo(corpo, re) {
   return null;
 }
 
+// Limites comuns evitam manter linhas antigas de conduta ou apagar a seção seguinte.
+var RE_FIM_BLOCO_CLINICO = /^(RELATO\s+DE\s+INTERNA[ÇC][ÃA]O\b|HPP\b|EVOLU[ÇC][ÃA]O\s+CL[ÍI]NICA\b|EXAME\s+(?:F[ÍI]SICO\b|(?:DO\s+)?RN\b)|CONDUTA\b|SOLICITA[ÇC][ÃA]O\b|ASSINATURA\b|DATA\b)/i;
+
 var BLOCOS = {
+  RELATO: {
+    nome: 'RELATO DE INTERNAÇÃO',
+    inicio: /^(RELATO\s+DE\s+INTERNA[ÇC][ÃA]O)\s*:?\s*(.*)$/i,
+    parada: RE_FIM_BLOCO_CLINICO,
+  },
+  HPP: { nome: 'HPP', inicio: /^(HPP)\s*:?\s*(.*)$/i, parada: RE_FIM_BLOCO_CLINICO },
+  EVOLUCAO: {
+    nome: 'EVOLUÇÃO CLÍNICA',
+    inicio: /^(EVOLU[ÇC][ÃA]O\s+CL[ÍI]NICA)\s*:?\s*(.*)$/i,
+    parada: RE_FIM_BLOCO_CLINICO,
+  },
   EXAME_FISICO: {
     nome: 'EXAME FÍSICO',
     inicio: /^(EXAME\s+F[ÍI]SICO)\s*:?\s*(.*)$/i,
-    parada: /^(CONDUTA|EXAME\s+(DO\s+)?RN|ASSINATURA)/i,
+    parada: RE_FIM_BLOCO_CLINICO,
+  },
+  EXAME_RN: {
+    nome: 'EXAME DO RN',
+    inicio: /^(EXAME\s+(?:DO\s+)?RN)\s*:?\s*(.*)$/i,
+    parada: RE_FIM_BLOCO_CLINICO,
   },
   CONDUTA: {
     nome: 'CONDUTA',
     inicio: /^(CONDUTA)\s*:?\s*(.*)$/i,
-    parada: /^/,
+    parada: RE_FIM_BLOCO_CLINICO,
   },
   SOLICITACAO: {
     nome: 'SOLICITAÇÃO DE EXAMES',
     inicio: /^(SOLICITA[ÇC][ÃA]O(?:\s+DE\s+EXAMES)?)\s*:?\s*(.*)$/i,
-    parada: /^ASSINATURA/i,
+    parada: RE_FIM_BLOCO_CLINICO,
     // Como nos prontuários preenchidos: um exame por linha, 14 pt, sem negrito, alinhado à esquerda
     // (com o mesmo recuo do título "SOLICITAÇÃO").
     estiloNovas: { alinhamento: 'LEFT', tamanho: 14, negrito: false },
   },
 };
+
+/** Visita o corpo e cada célula, inclusive tabelas aninhadas. */
+function percorrerContainersDocumento(container, visitar) {
+  visitar(container);
+  for (var i = 0; i < container.getNumChildren(); i++) {
+    var e = container.getChild(i);
+    if (e.getType() !== DocumentApp.ElementType.TABLE) continue;
+    var tabela = e.asTable();
+    for (var r = 0; r < tabela.getNumRows(); r++) {
+      var linha = tabela.getRow(r);
+      for (var c = 0; c < linha.getNumCells(); c++) percorrerContainersDocumento(linha.getCell(c), visitar);
+    }
+  }
+}
+
+function substituirBlocosDocumento(corpo, chave, linhas) {
+  var bloco = BLOCOS[chave], quantidade = 0;
+  percorrerContainersDocumento(corpo, function (container) {
+    // De trás para frente para tratar todas as ocorrências sem deslocar os índices.
+    for (var i = container.getNumChildren() - 1; i >= 0; i--) {
+      var e = container.getChild(i);
+      if (!ehParagrafo(e) || !bloco.inicio.test(e.getText().trim())) continue;
+      substituirBloco(container, bloco.inicio, bloco.parada, linhas, bloco.estiloNovas, i);
+      quantidade++;
+    }
+  });
+  return quantidade;
+}
+
+function preencherBlocoClinico(corpo, chave, valor, contexto) {
+  var linhas = dividirLinhas(valor), bloco = BLOCOS[chave];
+  if (!linhas.length) {
+    linhas = [chave === 'EXAME_FISICO' || chave === 'EXAME_RN' ? 'SEM AVALIAÇÃO REGISTRADA — PREENCHER' : 'NÃO INFORMADO — PREENCHER'];
+    contexto.avisos.push(bloco.nome + ': não informado; preencher antes do uso.');
+  }
+  // A estrutura é preparada antes das respostas. Não interpreta títulos digitados pelo médico.
+  if (!preencherMarcador(corpo, chave, linhas.join('\n'))) {
+    corpo.appendParagraph(bloco.nome + ':');
+    linhas.forEach(function (linha) { corpo.appendParagraph(linha); });
+    contexto.avisos.push('Bloco ' + bloco.nome + ' ausente no modelo; conteúdo incluído ao final.');
+  }
+}
+
+var ROTULOS_CAMPOS = {
+  NOME: 'NOME', PRONTUARIO: 'PRONTUÁRIO', REGISTRO: 'REGISTRO', DATA: 'DATA', HORA: 'HORA',
+  ENFERMARIA: 'ENFERMARIA', LEITO: 'LEITO', IDADE: 'IDADE', PESO: 'PESO (kg)',
+  DATA_ADMISSAO: 'DATA DE ADMISSÃO', DATA_NASCIMENTO: 'DATA DE NASCIMENTO',
+  DIAS_INTERNACAO: 'DIAS DE INTERNAÇÃO', HIPOTESE: 'HIPÓTESE DIAGNÓSTICA',
+  PRONTUARIO_RN: 'PRONTUÁRIO DO RN', REGISTRO_RN: 'REGISTRO DO RN', IDADE_RN: 'IDADE DO RN', PESO_RN: 'PESO DO RN (kg)',
+  INDICACAO_RN: 'INDICAÇÃO DA PRESCRIÇÃO DO RN',
+};
+
+/** Não descarta valores de campos cujo marcador esteja faltando. */
+function preencherCampoGarantido(corpo, chave, valor, contexto) {
+  var texto = String(valor === undefined || valor === null ? '' : valor);
+  if (preencherMarcador(corpo, chave, texto) || !texto || chave === 'DATA_CABECALHO') return;
+  corpo.appendParagraph((ROTULOS_CAMPOS[chave] || chave) + ': ' + texto);
+  contexto.avisos.push('Marcador ' + chave + ' ausente no modelo; valor incluído ao final.');
+}
+
+function limparObstetriciaDocumento(corpo) {
+  percorrerContainersDocumento(corpo, function (container) {
+    for (var i = 0; i < container.getNumChildren(); i++) {
+      var e = container.getChild(i);
+      if (!ehParagrafo(e)) continue;
+      var limpo = limparLinhaObstetrica(e.getText());
+      if (limpo !== e.getText()) trocarTextoParagrafo(comoParagrafo(e), limpo);
+    }
+  });
+}
+
+/** Executada nos modelos novos e nas novas cópias, antes de inserir respostas. */
+function prepararBlocosClinicos(corpo, incluirRn) {
+  var encontrados = {};
+  // Uma única travessia dos containers evita reler todas as células para cada bloco.
+  percorrerContainersDocumento(corpo, function (container) {
+    for (var i = 0; i < container.getNumChildren(); i++) {
+      var e = container.getChild(i);
+      if (!ehParagrafo(e)) continue;
+      var texto = e.getText();
+      var combinado = texto.match(/^(.*?)(EVOLU[ÇC][ÃA]O\s*\/\s*EXAME\s+F[ÍI]SICO)\s*:?\s*(.*)$/i);
+      if (combinado) {
+        if (combinado[1].trim()) {
+          texto = combinado[1].replace(/\s+$/, '');
+          trocarTextoParagrafo(comoParagrafo(e), texto);
+          container.insertParagraph(i + 1, 'EXAME FÍSICO: ' + combinado[3]);
+        } else {
+          texto = 'EXAME FÍSICO: ' + combinado[3];
+          trocarTextoParagrafo(comoParagrafo(e), texto);
+        }
+      }
+      if (BLOCOS.RELATO.inicio.test(texto.trim()) && /\bHPP\b/.test(texto)) {
+        trocarTextoParagrafo(comoParagrafo(e), 'RELATO DE INTERNAÇÃO: {{RELATO}}');
+        container.insertParagraph(i + 1, 'HPP: {{HPP}}');
+      }
+      var limpo = limparLinhaObstetrica(texto);
+      if (limpo !== texto) trocarTextoParagrafo(comoParagrafo(e), limpo);
+    }
+    for (var j = container.getNumChildren() - 1; j >= 0; j--) {
+      var paragrafo = container.getChild(j);
+      if (!ehParagrafo(paragrafo)) continue;
+      var titulo = paragrafo.getText().trim();
+      Object.keys(BLOCOS).some(function (chave) {
+        if (chave === 'EXAME_RN' && !incluirRn) return false;
+        var bloco = BLOCOS[chave];
+        if (!bloco.inicio.test(titulo)) return false;
+        substituirBloco(container, bloco.inicio, bloco.parada, ['{{' + chave + '}}'], bloco.estiloNovas, j);
+        encontrados[chave] = true;
+        return true;
+      });
+    }
+  });
+  Object.keys(BLOCOS).forEach(function (chave) {
+    if (chave === 'EXAME_RN' && !incluirRn) return;
+    if (!encontrados[chave]) corpo.appendParagraph(BLOCOS[chave].nome + ': {{' + chave + '}}');
+  });
+}
