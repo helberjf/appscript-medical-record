@@ -7,7 +7,7 @@ const vm = require('node:vm');
 function ambiente(opcoes = {}) {
   const abas = {};
   const planilha = {getSheetByName:n=>abas[n] || null, insertSheet:n=>abas[n] = {linhas:[], appendRow(row) {this.linhas.push(row);},getDataRange(){return {getValues:()=>this.linhas};}}};
-  const props = {PLANILHA_ID:'planilha', MODELOS_VERSAO:'2'};
+  const props = {PLANILHA_ID:'planilha', MODELOS_VERSAO:'3'};
   const resposta = {getId:()=> 'resposta-1',getRespondentEmail:()=>opcoes.email || 'medico@example.com',getTimestamp:()=>new Date('2026-10-20T12:00:00Z')};
   const ctx = {PROPS:{getProperty:k=>props[k]}, CONFIG:{ALLOWED_EMAILS:['medico@example.com'],ENFERMARIAS:[{opcao:'Pediatria',modelo:'PEDIATRIA'}],ENVIAR_EMAIL:!!opcoes.falhaEmail},
     SpreadsheetApp:{openById:()=>planilha}, Utilities:{formatDate:(_d,_f,p)=>p==='HH:mm'?'09:00':'20/10/2026'},
@@ -41,6 +41,23 @@ test('dados inválidos ficam no histórico e impedem geração', () => {
   assert.throws(()=>a.ctx.processarResposta(a.resposta),/admissão/);
   assert.equal(a.geracoes,0);
   assert.match(JSON.stringify(a.abas.Processamento.linhas),/ERRO/);
+});
+
+test('documento usa data e hora do atendimento quando informadas', () => {
+  const a = ambiente({respostas:{data_atendimento:'2026-10-18', hora_atendimento:'7:30'}});
+  let contexto; a.ctx.gerarProntuario=(_e,_r,c)=>{contexto={...c}; c.documentoUrl='u'; return {nome:'P',url:'u'};};
+  a.ctx.processarResposta(a.resposta);
+  assert.equal(contexto.hoje,'18/10/2026'); assert.equal(contexto.hora,'07:30'); assert.equal(contexto.envio,'20/10/2026');
+});
+
+test('fila ocupada: resposta fica registrada como ERRO_FILA, com aviso, em vez de sumir', () => {
+  const a = ambiente(); const avisos=[];
+  a.ctx.LockService={getScriptLock:()=>({tryLock:()=>false,releaseLock(){}})};
+  a.ctx.avisarErro=(_r,e)=>avisos.push(e.message);
+  assert.throws(()=>a.ctx.aoEnviarFormulario({response:a.resposta}),/Fila ocupada/);
+  assert.match(JSON.stringify(a.abas.Processamento.linhas),/ERRO_FILA/);
+  assert.match(avisos[0],/reprocessarResposta\("resposta-1"\)/);
+  assert.equal(a.geracoes,0);
 });
 
 test('resposta não autorizada também fica rastreável', () => {

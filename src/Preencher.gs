@@ -3,9 +3,26 @@
  * Nunca apaga, renomeia ou sobrescreve nada: se já existe um arquivo com o mesmo nome, o novo ganha " (2)".
  */
 
+/**
+ * Quanto um envio espera a vez enquanto outro documento está sendo gerado (cada um leva ~10–30 s).
+ * O gatilho pode rodar por até 6 min; 4 min de fila deixam tempo para gerar o próprio documento.
+ */
+var ESPERA_FILA_MS = 240000;
+
 function aoEnviarFormulario(evento) {
   var trava = LockService.getScriptLock();
-  trava.waitLock(30000); // dois médicos enviando juntos não criam pastas repetidas
+  // Dois médicos enviando juntos não criam pastas repetidas: um espera o outro terminar.
+  if (!trava.tryLock(ESPERA_FILA_MS)) {
+    // Antes, o waitLock de 30 s estourava fora do try: a resposta ficava sem registro e sem aviso.
+    var erroFila = new Error('Fila ocupada por mais de ' + ESPERA_FILA_MS / 1000 + ' s; documento NÃO gerado. ' +
+      'Para gerar, rode reprocessarResposta("' + evento.response.getId() + '") ou reenvie o formulário.');
+    try {
+      registrarTentativa({respostaId: evento.response.getId(), quando: evento.response.getTimestamp(),
+        email: evento.response.getRespondentEmail(), avisos: []}, 'ERRO_FILA', erroFila);
+    } catch (erroRegistro) { console.error('Falha de auditoria: ' + erroRegistro); }
+    try { avisarErro(evento.response, erroFila); } catch (erroEmail) { console.error(erroEmail); }
+    throw erroFila;
+  }
   try {
     processarResposta(evento.response);
   } catch (erro) {
@@ -15,6 +32,16 @@ function aoEnviarFormulario(evento) {
   } finally {
     trava.releaseLock();
   }
+}
+
+/**
+ * Gera de novo o documento de uma resposta já enviada (ex.: ERRO_FILA). Usa o ID que aparece na aba
+ * Processamento e no e-mail de erro. Cria um documento novo; não altera nem apaga o que já existe.
+ */
+function reprocessarResposta(respostaId) {
+  if (!respostaId) throw new Error('Informe o ID da resposta (aba Processamento).');
+  var resposta = FormApp.openById(PROPS.getProperty('FORM_ID')).getResponse(respostaId);
+  aoEnviarFormulario({response: resposta});
 }
 
 function formatar(data, padrao) {
@@ -96,7 +123,11 @@ function processarResposta(resposta) {
     enfermaria = CONFIG.ENFERMARIAS.filter(function (e) { return e.opcao === r.enfermaria; })[0];
     if (!enfermaria) throw new Error('Enfermaria desconhecida.');
     validarDadosResposta(r, contexto.hoje, enfermaria.modelo, CONFIG.ANO_MINIMO_ADMISSAO);
-    if (!enfermaria.receitaAlta && PROPS.getProperty('MODELOS_VERSAO') !== '2') {
+    // O documento usa a data/hora do ATENDIMENTO (informadas no Form); vazias = momento do envio.
+    contexto.envio = contexto.hoje;
+    contexto.hoje = dataAtendimentoBr(r, contexto.envio);
+    if (normalizarHora(r.hora_atendimento)) contexto.hora = normalizarHora(r.hora_atendimento);
+    if (!enfermaria.receitaAlta && PROPS.getProperty('MODELOS_VERSAO') !== VERSAO_MODELOS) {
       throw new Error('Modelos antigos bloqueados. Rode recriarModelosDoFormulario() e atualizarFormulario().');
     }
     resultado = enfermaria.receitaAlta ? gerarReceitaAlta(enfermaria, r, contexto) : gerarProntuario(enfermaria, r, contexto);
@@ -128,7 +159,7 @@ function processarResposta(resposta) {
 
 function gerarProntuario(enfermaria, r, contexto) {
   if (!contexto || !contexto.respostaId) throw new Error('Geração avulsa sem ID da resposta bloqueada para manter a rastreabilidade. Use processarResposta().');
-  if (PROPS.getProperty('MODELOS_VERSAO') !== '2') throw new Error('Rode recriarModelosDoFormulario() antes de gerar documentos.');
+  if (PROPS.getProperty('MODELOS_VERSAO') !== VERSAO_MODELOS) throw new Error('Rode recriarModelosDoFormulario() antes de gerar documentos.');
   validarDadosResposta(r, contexto.hoje, enfermaria.modelo, CONFIG.ANO_MINIMO_ADMISSAO);
   var nome = nomeParaArquivo(r.nome);
   if (!nome) throw new Error('Nome do paciente vazio.');

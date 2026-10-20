@@ -3,6 +3,13 @@
  * São testadas fora do Apps Script com Node (veja testes/regras.test.js).
  */
 
+/**
+ * Versão dos modelos de formulário exigida pelo código. Sobe quando a preparação dos modelos muda,
+ * para bloquear documentos feitos a partir de modelos antigos até recriá-los.
+ * 3: título "EVOLUÇÃO / EXAME FÍSICO" preservado; conduta/nascimento ausentes inseridos no lugar certo.
+ */
+var VERSAO_MODELOS = '3';
+
 function semAcento(texto) {
   return String(texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
@@ -313,18 +320,73 @@ function dataRespostaUtc(valor) {
   return data.getUTCFullYear() === ano && data.getUTCMonth() === mes - 1 && data.getUTCDate() === dia ? data : null;
 }
 
+/**
+ * Idade como os médicos escrevem: "66", "66 anos", "1 ano e 3 meses", "1a 3m", "3 meses e 10 dias", "15d".
+ * Devolve { anos, meses, dias, menor } (menor = menor unidade informada) ou null se não entender.
+ * Unidades fora de ordem ou repetidas ("3 meses 1 ano") são recusadas para não haver ambiguidade.
+ */
 function lerIdade(valor) {
-  var m = String(valor || '').trim().toLowerCase().match(/^(\d+)\s*(anos?|a|mes(?:es)?|m|dias?|d)?$/);
-  if (!m) return null;
-  return {valor: Number(m[1]), unidade: !m[2] || /^a/.test(m[2]) ? 'anos' : /^m/.test(m[2]) ? 'meses' : 'dias'};
+  var texto = semAcento(String(valor || '')).trim().toLowerCase();
+  if (/^\d+$/.test(texto)) return {anos: Number(texto), meses: 0, dias: 0, menor: 'anos'};
+  var resto = texto.replace(/\s*(?:,|\be\b)\s*/g, ' ').trim();
+  var ordem = ['anos', 'meses', 'dias'], partes = {anos: 0, meses: 0, dias: 0}, ultima = -1, m;
+  while (resto && (m = resto.match(/^(\d+)\s*(anos|ano|a|meses|mes|m|dias|dia|d)(?![a-z])\s*/))) {
+    var unidade = /^a/.test(m[2]) ? 'anos' : /^m/.test(m[2]) ? 'meses' : 'dias';
+    if (ordem.indexOf(unidade) <= ultima) return null;
+    partes[unidade] = Number(m[1]);
+    ultima = ordem.indexOf(unidade);
+    resto = resto.slice(m[0].length);
+  }
+  if (resto || ultima === -1) return null;
+  partes.menor = ordem[ultima];
+  return partes;
 }
 
-function idadeNaData(nascimento, hoje, unidade) {
-  if (unidade === 'dias') return Math.floor((hoje - nascimento) / 86400000);
-  var meses = (hoje.getUTCFullYear() - nascimento.getUTCFullYear()) * 12 + hoje.getUTCMonth() - nascimento.getUTCMonth();
-  if (hoje.getUTCDate() < nascimento.getUTCDate()) meses--;
-  return unidade === 'meses' ? meses : Math.floor(meses / 12);
+/** Idade exata entre duas datas UTC: { anos, meses, dias } do calendário, mais totais em meses e dias. */
+function idadeExata(nascimento, referencia) {
+  var anos = referencia.getUTCFullYear() - nascimento.getUTCFullYear();
+  var meses = referencia.getUTCMonth() - nascimento.getUTCMonth();
+  var dias = referencia.getUTCDate() - nascimento.getUTCDate();
+  if (dias < 0) {
+    meses--;
+    dias += new Date(Date.UTC(referencia.getUTCFullYear(), referencia.getUTCMonth(), 0)).getUTCDate();
+  }
+  if (meses < 0) { anos--; meses += 12; }
+  return {anos: anos, meses: meses, dias: dias, totalMeses: anos * 12 + meses,
+    totalDias: Math.floor((referencia - nascimento) / 86400000)};
 }
+
+/** A idade digitada bate com o nascimento? Compara na menor unidade informada; em dias aceita ±1. */
+function idadeConfere(idade, nascimento, referencia) {
+  var exata = idadeExata(nascimento, referencia);
+  if (idade.menor === 'anos') return idade.anos === exata.anos;
+  if (idade.menor === 'meses') return idade.anos * 12 + idade.meses === exata.totalMeses;
+  if (!idade.anos && !idade.meses) return Math.abs(idade.dias - exata.totalDias) <= 1;
+  return idade.anos * 12 + idade.meses === exata.totalMeses && Math.abs(idade.dias - exata.dias) <= 1;
+}
+
+/**
+ * Mesmos formatos de lerIdade, como expressão regular do Google Forms (RE2, sem lookaround).
+ * Barra a digitação errada no próprio formulário, antes do envio.
+ */
+var UNIDADE_IDADE_FORM = '(?:[Aa](?:[Nn][Oo][Ss]?)?|[Mm](?:[EeÊê][Ss](?:[Ee][Ss])?)?|[Dd](?:[Ii][Aa][Ss]?)?)';
+var PADRAO_IDADE_FORM = '^\\s*\\d+\\s*(?:' + UNIDADE_IDADE_FORM +
+  '(?:\\s*(?:,|\\s[Ee])?\\s*\\d+\\s*' + UNIDADE_IDADE_FORM + ')*)?\\s*$';
+var PADRAO_PESO_FORM = '^\\s*\\d+(?:[.,]\\d+)?\\s*$';
+
+/** Data do atendimento ("dd/mm/aaaa"): a informada no Form ou, se vazia, a data do envio. */
+function dataAtendimentoBr(r, envioBr) {
+  return formatarDataResposta(r.data_atendimento) || envioBr;
+}
+
+/** "9:05" ou "09:05" -> "09:05"; outros formatos voltam vazios. */
+function normalizarHora(valor) {
+  var m = String(valor || '').trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  return m && Number(m[1]) < 24 && Number(m[2]) < 60 ? numero2(Number(m[1])) + ':' + m[2] : '';
+}
+
+/** Quantos dias antes do envio o atendimento pode ser registrado (pega ano digitado errado). */
+var DIAS_MAXIMOS_ATRASO_ATENDIMENTO = 31;
 
 function pesoValido(valor) {
   var texto = String(valor || '').trim().replace(',', '.');
@@ -335,24 +397,32 @@ function pesoValido(valor) {
 function validarDadosResposta(r, hojeBr, modelo, anoMinimoAdmissao) {
   var hoje = dataRespostaUtc(hojeBr);
   if (!hoje) throw new Error('Data de referência inválida.');
-  var admissao = dataRespostaUtc(r.data_admissao || hojeBr);
+  // Data do atendimento: a referência do documento (cabeçalho, dias de internação e idade).
+  var atendimentoBr = dataAtendimentoBr(r, hojeBr);
+  var atendimento = dataRespostaUtc(atendimentoBr);
+  if (!atendimento || atendimento > hoje || (hoje - atendimento) / 86400000 > DIAS_MAXIMOS_ATRASO_ATENDIMENTO) {
+    throw new Error('Data do atendimento inválida, futura ou com mais de ' + DIAS_MAXIMOS_ATRASO_ATENDIMENTO +
+      ' dias antes do envio; confira dia, mês e ano.');
+  }
+  if (r.hora_atendimento && !normalizarHora(r.hora_atendimento)) throw new Error('Hora do atendimento inválida.');
+  var admissao = dataRespostaUtc(r.data_admissao || atendimentoBr);
   var nascimento = r.data_nascimento ? dataRespostaUtc(r.data_nascimento) : null;
-  if (!admissao || admissao.getUTCFullYear() < (anoMinimoAdmissao || 2000) || admissao > hoje) {
-    throw new Error('Data de admissão inválida, antiga ou futura; corrija o ano e a data.');
+  if (!admissao || admissao.getUTCFullYear() < (anoMinimoAdmissao || 2000) || admissao > atendimento) {
+    throw new Error('Data de admissão inválida, antiga ou posterior ao atendimento; corrija o ano e a data.');
   }
   if (r.data_nascimento && (!nascimento || nascimento > hoje || nascimento > admissao)) {
     throw new Error('Data de nascimento inválida ou posterior à admissão/envio.');
   }
   var idade = r.idade ? lerIdade(r.idade) : null;
-  if (r.idade && !idade) throw new Error('Idade inválida. Informe um número em anos, meses ou dias.');
-  if (idade && nascimento && idade.valor !== idadeNaData(nascimento, hoje, idade.unidade)) {
-    throw new Error('Idade incompatível com a data de nascimento na data do envio.');
+  if (r.idade && !idade) throw new Error('Idade inválida. Exemplos: 66, 66 anos, 1 ano e 3 meses, 15 dias.');
+  if (idade && nascimento && !idadeConfere(idade, nascimento, atendimento)) {
+    throw new Error('Idade incompatível com a data de nascimento na data do atendimento.');
   }
   ['peso', 'PUERPERA.peso_rn'].forEach(function (chave) {
     if (r[chave] && !pesoValido(r[chave])) throw new Error('Peso inválido; informe um número positivo em kg.');
   });
   var idadeRn = r['PUERPERA.idade_rn'];
-  if (idadeRn && !lerIdade(idadeRn)) throw new Error('Idade do RN inválida; informe anos, meses ou dias.');
+  if (idadeRn && !lerIdade(idadeRn)) throw new Error('Idade do RN inválida. Exemplos: 2 dias, 1 mês e 5 dias.');
   if (modelo === 'PEDIATRIA' && (dividirLinhas(r['PEDIATRIA.adicionais']).length || haSelecaoPrescricao(r['PEDIATRIA.incluir'])) &&
       (!(idade || nascimento) || !pesoValido(r.peso) || !String(r.hipotese || '').trim())) {
     throw new Error('Prescrição pediátrica exige idade/nascimento, peso e indicação neste atendimento.');
