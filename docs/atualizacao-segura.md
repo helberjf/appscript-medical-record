@@ -26,10 +26,13 @@ Selecionar itens clínicos em pediatria ou para o RN exige idade, peso e indica�
 ## Conferência em modo de teste
 
 - Envie um atendimento fictício com exame físico, conduta e prescrição vazios. O exame deve indicar “SEM AVALIAÇÃO REGISTRADA — PREENCHER”; não devem aparecer afebril, Glasgow, alta ou medicamentos herdados. As células de prescrição ficam vazias e o aviso de ausência deve constar do registro/e-mail.
-- Na puérpera, confira que dilatação, idade gestacional, BCF e dinâmica uterina antigos não reaparecem. Digite conduta, nascimento e exame do RN e verifique que todos foram transferidos. Campos sem marcador são acrescentados ao final com rótulo.
+- Na puérpera, confira que dilatação, idade gestacional, BCF e dinâmica uterina antigos não reaparecem. Digite conduta, nascimento e exame do RN e verifique que todos foram transferidos: a conduta entra antes da assinatura da evolução e o nascimento dentro da caixa de internação (não no fim do documento).
+- O título "EVOLUÇÃO / EXAME FÍSICO" deve continuar no documento e o exame físico deve aparecer uma vez só.
 - Em pediatria/RN, informar itens sem idade, peso positivo ou indicação deve impedir a criação. A indicação do RN é própria do RN. Doses, concentração, via e frequência precisam de revisão médica em cada atendimento.
-- Datas inexistentes ou futuras, admissão em 1900 e idade incompatível com nascimento devem impedir a geração. A idade é comparada com a data do envio e aceita número em anos, meses ou dias; sem unidade significa anos.
-- Confira a aba `Processamento`: `INICIADA`, `ARQUIVO_CRIADO`, `GERADO`, `IGNORADA`, `ERRO`, `EMAIL_FALHOU` ou `DOCX_FALHOU`. Falhas depois da cópia devem conservar o ID/link do arquivo parcial. `Documentos gerados` continua com o formato antigo, para preservar sua leitura histórica.
+- Datas inexistentes ou futuras, admissão em 1900 e idade incompatível com nascimento devem impedir a geração. A idade é comparada com a **data do atendimento** e aceita formatos compostos ("66", "66 anos", "1 ano e 3 meses", "1a 3m", "3 meses e 10 dias", "15 dias"); sem unidade significa anos.
+- Data e hora do atendimento são perguntas opcionais; vazias = momento do envio. O atendimento não pode ser futuro nem ter mais de 31 dias antes do envio (pega ano digitado errado), e a admissão não pode ser posterior a ele.
+- Idade e peso são validados no próprio Form antes do envio. Datas não têm validação no Google Forms e continuam conferidas pelo script.
+- Confira a aba `Processamento`: `INICIADA`, `ARQUIVO_CRIADO`, `GERADO`, `IGNORADA`, `ERRO`, `ERRO_FILA`, `EMAIL_FALHOU` ou `DOCX_FALHOU`. `ERRO_FILA` significa que outro documento ocupou a fila por mais de 4 minutos; gere com `reprocessarResposta("ID")`. Falhas depois da cópia devem conservar o ID/link do arquivo parcial. `Documentos gerados` continua com o formato antigo, para preservar sua leitura histórica.
 
 Se `PLANILHA_ID` estiver ausente ou a auditoria falhar no início, nenhum documento será criado. Se falhar depois da cópia, consulte o histórico disponível e as execuções do Apps Script; não use o arquivo parcial sem revisão.
 

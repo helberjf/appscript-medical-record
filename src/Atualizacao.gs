@@ -28,7 +28,7 @@ function reabrirAposAtualizacao() {
   var form = FormApp.openById(PROPS.getProperty('FORM_ID'));
   form.setAcceptingResponses(PROPS.getProperty('FORM_ESTADO_ANTES_ATUALIZACAO') === 'true');
   PROPS.deleteProperty('FORM_ESTADO_ANTES_ATUALIZACAO');
-  PROPS.setProperty('VERSAO_ONLINE', '2026-10-20-selecao-positiva');
+  PROPS.setProperty('VERSAO_ONLINE', '2026-10-20-modelos-v' + VERSAO_MODELOS);
   console.log('Atualização concluída. Formulário: ' + form.getPublishedUrl());
 }
 
@@ -37,7 +37,8 @@ function migrarProximoModeloOnline() {
   var trava = LockService.getScriptLock();
   trava.waitLock(30000);
   try {
-    var estado = lerJsonPropriedade('MIGRACAO_MODELOS_20261020', {ids:{},relatorio:[],carimbo:formatar(new Date(),'dd-MM-yyyy HH.mm')});
+    var chaveMigracao = 'MIGRACAO_MODELOS_V' + VERSAO_MODELOS; // uma migração por versão dos modelos
+    var estado = lerJsonPropriedade(chaveMigracao, {ids:{},relatorio:[],carimbo:formatar(new Date(),'dd-MM-yyyy HH.mm')});
     if (estado.concluido) { verificarAtualizacaoOnline(); console.log('Migração já concluída.'); return; }
     prepararAtualizacaoOnline();
     var ordem = Object.keys(CONFIG.MODELOS);
@@ -51,18 +52,18 @@ function migrarProximoModeloOnline() {
       var criado = criarModeloSeguro(chave, pasta, estado.carimbo);
       estado.ids[chave] = criado.id;
       estado.relatorio.push(criado.relatorio);
-      PROPS.setProperty('MIGRACAO_MODELOS_20261020', JSON.stringify(estado));
+      PROPS.setProperty(chaveMigracao, JSON.stringify(estado));
       console.log('Modelo pronto: ' + chave + '. Progresso: ' + Object.keys(estado.ids).length + '/' + ordem.length);
     }
     if (Object.keys(estado.ids).length !== ordem.length) { console.log('Execute migrarProximoModeloOnline() novamente para continuar.'); return; }
     PROPS.setProperty('MODELOS', JSON.stringify(estado.ids));
-    PROPS.setProperty('MODELOS_VERSAO', '2');
+    PROPS.setProperty('MODELOS_VERSAO', VERSAO_MODELOS);
     console.log('Relatório: ' + escreverRelatorio(pasta, estado.carimbo, estado.relatorio));
     atualizarFormulario();
     verificarAtualizacaoOnline();
     reabrirAposAtualizacao();
     estado.concluido = true;
-    PROPS.setProperty('MIGRACAO_MODELOS_20261020', JSON.stringify(estado));
+    PROPS.setProperty(chaveMigracao, JSON.stringify(estado));
   } finally { trava.releaseLock(); }
 }
 
@@ -78,15 +79,15 @@ function diagnosticarAtualizacaoOnline() {
 }
 
 function verificarAtualizacaoOnline() {
-  if (PROPS.getProperty('MODELOS_VERSAO') !== '2') throw new Error('Versão dos modelos não atualizada.');
+  if (PROPS.getProperty('MODELOS_VERSAO') !== VERSAO_MODELOS) throw new Error('Versão dos modelos não atualizada.');
   var ids = idsModelosFormulario();
   Object.keys(CONFIG.MODELOS).forEach(function (chave) {
     var corpo = DocumentApp.openById(ids[chave]).getBody();
     ['EXAME_FISICO', 'CONDUTA', 'DATA_NASCIMENTO'].forEach(function (campo) {
-      // Nascimento pode usar o fallback no documento final; os blocos clínicos são obrigatórios no modelo.
-      if (campo !== 'DATA_NASCIMENTO' && !corpo.findText('\\{\\{' + campo + '\\}\\}')) {
-        throw new Error('Modelo ' + chave + ' sem o marcador ' + campo);
-      }
+      var vezes = corpo.getText().split('{{' + campo + '}}').length - 1;
+      if (!vezes) throw new Error('Modelo ' + chave + ' sem o marcador ' + campo);
+      // O exame aparecia duas vezes quando o título "EVOLUÇÃO / EXAME FÍSICO" virava campo.
+      if (campo === 'EXAME_FISICO' && vezes > 1) throw new Error('Modelo ' + chave + ' com o exame físico repetido');
     });
     tabelasPrescricao(corpo).forEach(function (tabela) {
       if (itensPadraoDaTabela(tabela).length) throw new Error('Modelo ' + chave + ' ainda contém itens de prescrição.');

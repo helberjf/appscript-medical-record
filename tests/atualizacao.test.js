@@ -8,8 +8,8 @@ function ambiente(falhar=false) {
   const chamadas=[];
   const form={isAcceptingResponses:()=>aberto,setAcceptingResponses:v=>{aberto=v;},getPublishedUrl:()=> 'https://form.example',getResponses:()=>[1,2,3,4,5]};
   const c={PROPS:{getProperty:k=>props[k] === undefined ? null : props[k],setProperty:(k,v)=>props[k]=v,deleteProperty:k=>delete props[k]},
-    FormApp:{openById:()=>form},LockService:{getScriptLock:()=>({waitLock(){},releaseLock(){}})},CONFIG:{MODO_TESTE:true},console:{log(){}},
-    recriarModelosDoFormulario:()=>{chamadas.push('modelos');if(falhar)throw Error('Falha de conversão');props.MODELOS_VERSAO='2';},
+    FormApp:{openById:()=>form},LockService:{getScriptLock:()=>({waitLock(){},releaseLock(){}})},CONFIG:{MODO_TESTE:true},VERSAO_MODELOS:'3',console:{log(){}},
+    recriarModelosDoFormulario:()=>{chamadas.push('modelos');if(falhar)throw Error('Falha de conversão');props.MODELOS_VERSAO='3';},
     atualizarFormulario:()=>chamadas.push('formulario'),verificarAtualizacaoOnline:()=>chamadas.push('verificar')};
   vm.createContext(c);
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/Atualizacao.gs'),'utf8'),c);

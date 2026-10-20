@@ -142,6 +142,33 @@ test('modelo feminino com título combinado após identificação não conserva 
   assert.match(corpo.getText(),/SEM AVALIAÇÃO REGISTRADA/);
 });
 
+test('título "EVOLUÇÃO / EXAME FÍSICO" fica como está e o exame aparece uma vez só', () => {
+  const c=carregar();
+  const corpo=new Container(['EVOLUÇÃO / EXAME FÍSICO', '', 'RELATO DE INTERNAÇÃO : antigo', 'HPP : antiga',
+    'EVOLUÇÃO CLÍNICA: antiga', 'EXAME FÍSICO', 'BEG, AFEBRIL', 'CONDUTA: ALTA HOSPITALAR', 'ASSINATURA MÉDICA: ____']);
+  c.prepararBlocosClinicos(corpo);
+  c.preencherBlocoClinico(corpo,'EXAME_FISICO','Exame digitado',{avisos:[]});
+  assert.match(corpo.getText(),/^EVOLUÇÃO \/ EXAME FÍSICO$/m);
+  assert.equal(corpo.getText().match(/Exame digitado/g).length, 1);
+  assert.doesNotMatch(corpo.getText(),/BEG|AFEBRIL|ALTA HOSPITALAR/);
+});
+
+test('conduta ausente (puérpera) entra antes da assinatura da evolução, não no fim do documento', () => {
+  const c=carregar();
+  const corpo=new Container(['DATA DE ADMISSÃO: {{DATA_ADMISSAO}}   DIAS DE INTERNAÇÃO: {{DIAS_INTERNACAO}}',
+    'RELATO DE INTERNAÇÃO: x', 'HPP: y', 'EVOLUÇÃO CLÍNICA: z', 'EXAME FÍSICO: w', 'EXAME RN: v', '',
+    'ASSINATURA MÉDICA: ____ DATA: {{DATA}}', 'SOLICITAÇÃO DE EXAMES:', 'HEMOGRAMA', 'ASSINATURA MÉDICA: ____ DATA: {{DATA}}']);
+  c.prepararBlocosClinicos(corpo, true);
+  const linhas = corpo.getText().split('\n');
+  const conduta = linhas.findIndex(l => /^CONDUTA: \{\{CONDUTA\}\}$/.test(l));
+  assert.ok(conduta > linhas.findIndex(l => /^EXAME RN/.test(l)));
+  assert.ok(conduta < linhas.findIndex(l => /^ASSINATURA/.test(l)));
+  assert.match(linhas[0], /\{\{DATA_ADMISSAO\}\}   DATA DE NASCIMENTO: \{\{DATA_NASCIMENTO\}\}   DIAS DE INTERNAÇÃO/);
+  c.prepararBlocosClinicos(corpo, true); // na cópia roda de novo: não pode duplicar
+  assert.equal(corpo.getText().match(/\{\{CONDUTA\}\}/g).length, 1);
+  assert.equal(corpo.getText().match(/\{\{DATA_NASCIMENTO\}\}/g).length, 1);
+});
+
 test('subtítulos de exame e prescrição antigos são removidos junto ao bloco clínico', () => {
   const c=carregar();
   const corpo=new Container(['EXAME FÍSICO','Exame neurológico: Glasgow 15, sem déficit',

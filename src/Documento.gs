@@ -447,6 +447,69 @@ function limparObstetriciaDocumento(corpo) {
   });
 }
 
+/**
+ * "EVOLUÇÃO / EXAME FÍSICO" é o TÍTULO da seção nos modelos do hospital (às vezes no fim da caixa de
+ * internação), não o campo do exame: o campo é o parágrafo "EXAME FÍSICO" mais abaixo. O título fica como
+ * está; só linhas de texto herdado logo depois dele (antes do próximo rótulo, tabela ou linha em branco
+ * seguida de rótulo) são retiradas, para não conservar achados antigos.
+ */
+var RE_TITULO_EVOLUCAO_EXAME = /EVOLU[ÇC][ÃA]O\s*\/\s*EXAME\s+F[ÍI]SICO\s*:?\s*$/i;
+
+function retirarTextoAposTitulo(container, indiceTitulo) {
+  for (var j = indiceTitulo + 1; j < container.getNumChildren(); ) {
+    var proximo = container.getChild(j);
+    if (!ehParagrafo(proximo)) return;
+    var texto = proximo.getText().trim();
+    if (RE_FIM_BLOCO_CLINICO.test(texto) || /\{\{/.test(texto)) return;
+    if (texto) proximo.removeFromParent(); else j++;
+  }
+}
+
+/** Parágrafo do corpo (fora de tabelas) que começa um bloco clínico, ou -1. */
+function indiceBlocoNoCorpo(corpo, chave) {
+  for (var i = 0; i < corpo.getNumChildren(); i++) {
+    var e = corpo.getChild(i);
+    if (ehParagrafo(e) && BLOCOS[chave].inicio.test(e.getText().trim())) return i;
+  }
+  return -1;
+}
+
+/**
+ * Bloco que o modelo não tem (ex.: CONDUTA na puérpera): entra logo antes da assinatura que fecha
+ * os blocos anteriores a ele, com o estilo do bloco anterior. Só vai para o fim se não houver lugar.
+ */
+function inserirBlocoAusente(corpo, chave) {
+  var ordem = Object.keys(BLOCOS), anterior = -1;
+  ordem.slice(0, ordem.indexOf(chave)).forEach(function (outra) {
+    anterior = Math.max(anterior, indiceBlocoNoCorpo(corpo, outra));
+  });
+  var texto = BLOCOS[chave].nome + ': {{' + chave + '}}';
+  if (anterior === -1) { corpo.appendParagraph(texto); return; }
+  for (var i = anterior + 1; i < corpo.getNumChildren(); i++) {
+    var e = corpo.getChild(i);
+    if (ehParagrafo(e) && /^ASSINATURA\b/i.test(e.getText().trim())) {
+      var modelo = corpo.getChild(anterior);
+      var novo = modelo.getType() === DocumentApp.ElementType.LIST_ITEM
+        ? corpo.insertParagraph(i, texto)
+        : corpo.insertParagraph(i, modelo.asParagraph().copy());
+      trocarTextoParagrafo(novo, texto);
+      return;
+    }
+  }
+  corpo.appendParagraph(texto);
+}
+
+/**
+ * Caixa de internação sem "DATA DE NASCIMENTO" (puérpera): o rótulo e o marcador entram logo depois
+ * da data de admissão, na mesma linha, em vez de irem para o fim do documento.
+ */
+function garantirNascimentoNaInternacao(corpo) {
+  if (corpo.findText('\\{\\{DATA_NASCIMENTO\\}\\}')) return;
+  var achado = corpo.findText('\\{\\{DATA_ADMISSAO\\}\\}');
+  if (!achado) return;
+  achado.getElement().asText().insertText(achado.getEndOffsetInclusive() + 1, '   DATA DE NASCIMENTO: {{DATA_NASCIMENTO}}');
+}
+
 /** Executada nos modelos novos e nas novas cópias, antes de inserir respostas. */
 function prepararBlocosClinicos(corpo, incluirRn) {
   var encontrados = {};
@@ -456,17 +519,7 @@ function prepararBlocosClinicos(corpo, incluirRn) {
       var e = container.getChild(i);
       if (!ehParagrafo(e)) continue;
       var texto = e.getText();
-      var combinado = texto.match(/^(.*?)(EVOLU[ÇC][ÃA]O\s*\/\s*EXAME\s+F[ÍI]SICO)\s*:?\s*(.*)$/i);
-      if (combinado) {
-        if (combinado[1].trim()) {
-          texto = combinado[1].replace(/\s+$/, '');
-          trocarTextoParagrafo(comoParagrafo(e), texto);
-          container.insertParagraph(i + 1, 'EXAME FÍSICO: ' + combinado[3]);
-        } else {
-          texto = 'EXAME FÍSICO: ' + combinado[3];
-          trocarTextoParagrafo(comoParagrafo(e), texto);
-        }
-      }
+      if (RE_TITULO_EVOLUCAO_EXAME.test(texto)) retirarTextoAposTitulo(container, i);
       if (BLOCOS.RELATO.inicio.test(texto.trim()) && /\bHPP\b/.test(texto)) {
         trocarTextoParagrafo(comoParagrafo(e), 'RELATO DE INTERNAÇÃO: {{RELATO}}');
         container.insertParagraph(i + 1, 'HPP: {{HPP}}');
@@ -490,6 +543,7 @@ function prepararBlocosClinicos(corpo, incluirRn) {
   });
   Object.keys(BLOCOS).forEach(function (chave) {
     if (chave === 'EXAME_RN' && !incluirRn) return;
-    if (!encontrados[chave]) corpo.appendParagraph(BLOCOS[chave].nome + ': {{' + chave + '}}');
+    if (!encontrados[chave]) inserirBlocoAusente(corpo, chave);
   });
+  garantirNascimentoNaInternacao(corpo);
 }

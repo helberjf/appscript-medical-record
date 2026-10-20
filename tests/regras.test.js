@@ -178,6 +178,30 @@ test('validação respeita aniversário, meses e dias, sem tratar bebês como ad
   assert.throws(() => ctx.validarDadosResposta({data_nascimento:'2026-08-20', idade:'3 meses'}, '20/10/2026', 'PEDIATRIA'), /idade/i);
 });
 
+test('idade pediátrica composta, como os médicos escrevem', () => {
+  // Nascido em 10/07/2025; atendimento em 20/10/2026 = 1 ano, 3 meses e 10 dias (467 dias).
+  for (const idade of ['1 ano e 3 meses', '1a 3m', '1a3m', '15 meses', '1 ano, 3 meses e 10 dias', '467 dias', '1 ano', '1'])
+    assert.doesNotThrow(() => ctx.validarDadosResposta({data_nascimento:'2025-07-10', idade}, '20/10/2026', 'PEDIATRIA'), idade);
+  for (const idade of ['1 ano e 4 meses', '2 anos', '1 ano, 3 meses e 20 dias', '3 meses 1 ano', 'RN'])
+    assert.throws(() => ctx.validarDadosResposta({data_nascimento:'2025-07-10', idade}, '20/10/2026', 'PEDIATRIA'), /idade/i, idade);
+  assert.deepEqual({...ctx.lerIdade('2 MESES e 5 dias')}, {anos:0, meses:2, dias:5, menor:'dias'});
+});
+
+test('data do atendimento: referência do documento, nunca futura nem com ano trocado', () => {
+  // Atendimento no dia 18, enviado no dia 20: idade e admissão conferidas no dia 18.
+  assert.doesNotThrow(() => ctx.validarDadosResposta({data_atendimento:'2026-10-18', data_admissao:'2026-10-15',
+    data_nascimento:'2000-10-19', idade:'25'}, '20/10/2026', 'MASCULINA'));
+  for (const r of [
+    { data_atendimento: '2026-10-21' },                              // futura
+    { data_atendimento: '2025-10-18' },                              // ano trocado (> 31 dias)
+    { data_atendimento: '2026-10-18', data_admissao: '2026-10-19' }, // admissão depois do atendimento
+    { hora_atendimento: '25:00' },
+  ]) assert.throws(() => ctx.validarDadosResposta(r, '20/10/2026', 'MASCULINA'), /atendimento|admissão|hora/i);
+  assert.equal(ctx.dataAtendimentoBr({}, '20/10/2026'), '20/10/2026');
+  assert.equal(ctx.dataAtendimentoBr({data_atendimento:'2026-10-18'}, '20/10/2026'), '18/10/2026');
+  assert.equal(ctx.normalizarHora('9:05'), '09:05');
+});
+
 test('prescrição pediátrica exige idade, peso e indicação por atendimento', () => {
   const completa = {idade:'2 anos', peso:'12,5', hipotese:'Indicação informada pelo médico', 'PEDIATRIA.adicionais':'Item informado pelo médico'};
   assert.doesNotThrow(() => ctx.validarDadosResposta(completa, '20/10/2026', 'PEDIATRIA'));

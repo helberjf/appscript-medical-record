@@ -60,7 +60,7 @@ function recriarModelosDoFormulario() {
   });
 
   PROPS.setProperty('MODELOS', JSON.stringify(ids));
-  PROPS.setProperty('MODELOS_VERSAO', '2');
+  PROPS.setProperty('MODELOS_VERSAO', VERSAO_MODELOS);
   var urlRelatorio = escreverRelatorio(pasta, carimbo, relatorio);
   console.log('Modelos criados na pasta "' + CONFIG.NOME_PASTA_MODELOS + '". Relatório: ' + urlRelatorio);
 }
@@ -243,6 +243,32 @@ function rotulosPrescricaoDoModelo(docId) {
   });
 }
 
+/**
+ * Validação no próprio Form: idade e peso digitados errado são barrados ANTES do envio
+ * (antes só o script recusava depois, e o médico tinha de preencher tudo de novo).
+ * Datas não têm validação no Google Forms; elas continuam conferidas pelo script.
+ */
+function aplicarValidacoes(chave, item) {
+  var regras = {
+    idade: [PADRAO_IDADE_FORM, 'Idade inválida. Ex.: 66, 66 anos, 1 ano e 3 meses, 15 dias.'],
+    'PUERPERA.idade_rn': [PADRAO_IDADE_FORM, 'Idade inválida. Ex.: 2 dias, 1 mês e 5 dias.'],
+    peso: [PADRAO_PESO_FORM, 'Só o número, em kg. Ex.: 70 ou 70,5.'],
+    'PUERPERA.peso_rn': [PADRAO_PESO_FORM, 'Só o número, em kg. Ex.: 3,2.'],
+  };
+  if (!regras[chave]) return item;
+  item.asTextItem().setValidation(FormApp.createTextValidation()
+    .setHelpText(regras[chave][1]).requireTextMatchesPattern(regras[chave][0]).build());
+  return item;
+}
+
+function adicionarPerguntasAtendimento(form) {
+  return {
+    data: form.addDateItem().setTitle('Data do atendimento').setIncludesYear(true)
+      .setHelpText('Em branco = data do envio. Preencha quando registrar depois do atendimento.'),
+    hora: form.addTimeItem().setTitle('Hora do atendimento').setHelpText('Em branco = hora do envio.'),
+  };
+}
+
 function configurarSelecaoPrescricao(item, catalogo) {
   var opcoes = itensRevisadosPrescricao((CONFIG.OPCOES_PRESCRICAO || {})[catalogo]);
   return item.setTitle(catalogo === 'RN' ? 'Itens para incluir na prescrição do RN' : 'Itens para incluir na prescrição')
@@ -277,7 +303,7 @@ function criarFormulario() {
   var itens = {};
   function guardar(item, chave) {
     itens[item.getId()] = chave;
-    return item;
+    return aplicarValidacoes(chave, item);
   }
 
   // Seção 1
@@ -315,10 +341,13 @@ function criarFormulario() {
   // Identificação
   var identificacao = form.addPageBreakItem().setTitle('Identificação do paciente');
   guardar(form.addTextItem().setTitle('Nome completo do paciente').setRequired(true), 'nome');
+  var atendimento = adicionarPerguntasAtendimento(form);
+  guardar(atendimento.data, 'data_atendimento');
+  guardar(atendimento.hora, 'hora_atendimento');
   guardar(form.addTextItem().setTitle('Prontuário'), 'prontuario');
   guardar(form.addTextItem().setTitle('Registro'), 'registro');
   guardar(form.addDateItem().setTitle('Data de nascimento').setIncludesYear(true), 'data_nascimento');
-  guardar(form.addTextItem().setTitle('Idade').setHelpText('Número em anos, meses ou dias; número sem unidade significa anos. Deve coincidir com nascimento na data do envio.'), 'idade');
+  guardar(form.addTextItem().setTitle('Idade').setHelpText('Ex.: 66, 66 anos, 1 ano e 3 meses, 15 dias. Deve coincidir com o nascimento na data do atendimento.'), 'idade');
   guardar(form.addTextItem().setTitle('Peso (kg)'), 'peso');
   guardar(form.addTextItem().setTitle('Leito'), 'leito');
   guardar(form.addDateItem().setTitle('Data de admissão').setIncludesYear(true).setHelpText('Em branco = hoje. Confira o ano completo.'), 'data_admissao');
@@ -375,6 +404,7 @@ function atualizarFormulario() {
   form.setDescription('Campos clínicos vazios ficam sem registro e geram aviso. A prescrição contém somente os itens informados neste atendimento. Revisão e assinatura médica obrigatórias.');
   Object.keys(porChave).forEach(function (chave) {
     var item = form.getItemById(porChave[chave]);
+    aplicarValidacoes(chave, item);
     if (/\.remover(?:_rn)?$/.test(chave)) {
       item.asCheckboxItem().setTitle('Campo antigo — não utilizar').setHelpText('Ignorado: nenhum item padrão é prescrito.').setChoiceValues(['Nenhum item padrão será incluído']).setRequired(false).showOtherOption(false);
     } else if (/\.incluir(?:_rn)?$/.test(chave)) {
@@ -386,7 +416,7 @@ function atualizarFormulario() {
     } else if (['exame_fisico','conduta','solicitacao','PUERPERA.exame_rn'].indexOf(chave) !== -1) {
       item.asParagraphTextItem().setHelpText('Em branco = sem registro; preencher após avaliação.');
     } else if (chave === 'data_admissao' || chave === 'data_nascimento') item.asDateItem().setIncludesYear(true).setHelpText('Confira dia, mês e ano completo.');
-    else if (chave === 'idade' || chave === 'PUERPERA.idade_rn') item.asTextItem().setHelpText('Número em anos, meses ou dias; sem unidade = anos.');
+    else if (chave === 'idade' || chave === 'PUERPERA.idade_rn') item.asTextItem().setHelpText('Ex.: 66, 66 anos, 1 ano e 3 meses, 15 dias.');
   });
   form.getItems(FormApp.ItemType.PAGE_BREAK).forEach(function (item) {
     item.asPageBreakItem().setHelpText('Campos vazios ficam sem registro. Prescrições e decisões dependem da avaliação médica deste atendimento.');
@@ -395,6 +425,11 @@ function atualizarFormulario() {
     itens[item.getId()] = chave;
     if (antesDe && porChave[antesDe] !== undefined) form.moveItem(item.getIndex(), form.getItemById(porChave[antesDe]).getIndex());
     porChave[chave] = item.getId();
+  }
+  if (porChave.data_atendimento === undefined) {
+    var atendimento = adicionarPerguntasAtendimento(form);
+    adicionarSeFaltar('data_atendimento', atendimento.data, 'prontuario');
+    adicionarSeFaltar('hora_atendimento', atendimento.hora, 'prontuario');
   }
   if (porChave['PUERPERA.indicacao_rn'] === undefined) adicionarSeFaltar('PUERPERA.indicacao_rn', form.addTextItem().setTitle('Indicação da prescrição do RN'), 'PUERPERA.adicionais_rn');
   if (porChave['alta.prescricao'] === undefined) adicionarSeFaltar('alta.prescricao', form.addParagraphTextItem().setTitle('Prescrição de alta deste atendimento').setHelpText('Um item completo por linha, individualizado pelo médico.'));
