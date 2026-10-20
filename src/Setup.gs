@@ -3,7 +3,7 @@
  *   1. criarModelosDoFormulario()  -> cria cópias em Google Docs dos modelos, com {{MARCADORES}}
  *   2. (confira os modelos novos e o relatório)
  *   3. criarFormulario()           -> cria o Google Form, a planilha de respostas e o gatilho
- * Se mudar um item padrão de prescrição num modelo de formulário, rode atualizarFormulario().
+ * atualizarFormulario() migra perguntas existentes sem excluir suas respostas históricas.
  */
 
 var PROPS = PropertiesService.getScriptProperties();
@@ -54,25 +54,31 @@ function recriarModelosDoFormulario() {
   var relatorio = [];
 
   Object.keys(CONFIG.MODELOS).forEach(function (chave) {
-    var modelo = CONFIG.MODELOS[chave];
-    var original = DriveApp.getFileById(modelo.docxId);
-    // Converte uma CÓPIA do .docx em Google Doc. O arquivo original não é tocado.
-    var novo = Drive.Files.create(
-      { name: 'MODELO FORMULÁRIO - ' + chave + ' (' + carimbo + ')', mimeType: MimeType.GOOGLE_DOCS, parents: [pasta.getId()] },
-      original.getBlob()
-    );
-    var doc = DocumentApp.openById(novo.id);
-    var resultado = marcarDocumento(doc.getBody());
-    relatorio.push(revisarModelo(chave, doc));
-    doc.saveAndClose();
-
-    ids[chave] = novo.id;
-    PROPS.setProperty('PADROES_' + chave, JSON.stringify(resultado.padroes));
+    var criado = criarModeloSeguro(chave, pasta, carimbo);
+    relatorio.push(criado.relatorio);
+    ids[chave] = criado.id;
   });
 
   PROPS.setProperty('MODELOS', JSON.stringify(ids));
+  PROPS.setProperty('MODELOS_VERSAO', '2');
   var urlRelatorio = escreverRelatorio(pasta, carimbo, relatorio);
   console.log('Modelos criados na pasta "' + CONFIG.NOME_PASTA_MODELOS + '". Relatório: ' + urlRelatorio);
+}
+
+/** Unidade de trabalho que pode ser retomada em outra execução do Apps Script. */
+function criarModeloSeguro(chave, pasta, carimbo) {
+  var original = DriveApp.getFileById(CONFIG.MODELOS[chave].docxId);
+  var novo = Drive.Files.create(
+    {name:'MODELO FORMULÁRIO - ' + chave + ' (' + carimbo + ')', mimeType:MimeType.GOOGLE_DOCS, parents:[pasta.getId()]},
+    original.getBlob()
+  );
+  var doc = DocumentApp.openById(novo.id);
+  var resultado = marcarDocumento(doc.getBody());
+  prepararBlocosClinicos(doc.getBody(), chave === 'PUERPERA');
+  var relatorio = revisarModelo(chave, doc);
+  doc.saveAndClose();
+  PROPS.setProperty('PADROES_' + chave, JSON.stringify(resultado.padroes));
+  return {id:novo.id, relatorio:relatorio};
 }
 
 /** Coloca os {{MARCADORES}} no modelo convertido. Devolve os textos padrão encontrados (HPP, evolução...). */
@@ -122,7 +128,7 @@ function marcarDocumento(corpo) {
 /**
  * Na tabela de prescrição do modelo: a célula antes de "Prontuário:" vira {{NOME}} (no da puérpera havia
  * o nome de uma paciente), as linhas são renumeradas 01, 02... sem pular e as células com só "." ficam vazias.
- * Os itens padrão continuam como estão, com a formatação do hospital.
+ * Os itens de prescrição ficam vazios: nenhuma ordem é herdada do modelo.
  */
 function prepararTabelaPrescricao(tabela, ehRn) {
   marcarCelulaNome(tabela, ehRn);
@@ -131,8 +137,7 @@ function prepararTabelaPrescricao(tabela, ehRn) {
     var numero = linha.getCell(0);
     if (ehParagrafo(numero.getChild(0))) trocarTextoParagrafo(comoParagrafo(numero.getChild(0)), numero2(k + 1));
     var item = linha.getCell(1);
-    if (itemPrescricaoVazio(item.getText()) && item.getText().trim() !== '') escreverTextoCelula(item, '');
-    else trocarSimboloSeNecessario(item);
+    escreverTextoCelula(item, '');
   });
 }
 
@@ -172,10 +177,15 @@ function revisarModelo(chave, doc) {
   (texto.match(/\{\{[A-Z_0-9]+\}\}/g) || []).forEach(function (m) { encontrados[m.slice(2, -2)] = true; });
   var avisos = [];
   var faltando = MARCADORES_ESPERADOS.filter(function (m) { return !encontrados[m]; });
-  if (faltando.length) avisos.push('Marcadores que não achei (o campo do Form não vai aparecer no documento): ' + faltando.join(', '));
+  if (faltando.length) avisos.push('Marcadores ausentes (valores informados serão incluídos ao final): ' + faltando.join(', '));
   Object.keys(BLOCOS).forEach(function (bloco) {
-    if (!encontrarParagrafo(corpo, BLOCOS[bloco].inicio)) {
-      avisos.push('Não achei o bloco "' + BLOCOS[bloco].nome + '": o que o médico digitar nesse campo não entra.');
+    if (bloco === 'EXAME_RN' && chave !== 'PUERPERA') return;
+    var existe = false;
+    percorrerContainersDocumento(corpo, function (container) {
+      if (encontrarParagrafo(container, BLOCOS[bloco].inicio)) existe = true;
+    });
+    if (!existe) {
+      avisos.push('Bloco "' + BLOCOS[bloco].nome + '" ausente; conteúdo será incluído ao final.');
     }
   });
   var tabelas = tabelasPrescricao(corpo).map(function (tabela, i) {
@@ -188,8 +198,7 @@ function revisarModelo(chave, doc) {
   if (!tabelas.length) avisos.push('Não achei a tabela de prescrição.');
   if (chave === 'PUERPERA') {
     avisos.push(
-      'O modelo da puérpera tinha dados de uma paciente. Confira e apague à mão o que sobrou dela ' +
-      '(linhas de dinâmica uterina, dilatação, BCF etc.) ou deixe só os rótulos.'
+      'Campos obstétricos identificados foram neutralizados. Confira o modelo completo para localizar outros dados herdados não reconhecidos.'
     );
   }
   return {
@@ -234,6 +243,13 @@ function rotulosPrescricaoDoModelo(docId) {
   });
 }
 
+function configurarSelecaoPrescricao(item, catalogo) {
+  var opcoes = itensRevisadosPrescricao((CONFIG.OPCOES_PRESCRICAO || {})[catalogo]);
+  return item.setTitle(catalogo === 'RN' ? 'Itens para incluir na prescrição do RN' : 'Itens para incluir na prescrição')
+    .setHelpText('Selecione somente o que deve entrar neste atendimento. Nada selecionado = nenhum item desta lista. Revise os itens para este paciente.')
+    .setChoiceValues(opcoes.length ? opcoes : [SEM_OPCOES_PRESCRICAO]).setRequired(false).showOtherOption(false);
+}
+
 function criarFormulario() {
   if (PROPS.getProperty('FORM_ID')) {
     var existente = FormApp.openById(PROPS.getProperty('FORM_ID'));
@@ -247,7 +263,7 @@ function criarFormulario() {
   var form = FormApp.create(CONFIG.TITULO_FORMULARIO);
   form.setDescription(
     'Preencha os dados e o documento (prescrição + evolução + solicitação) é criado na pasta do paciente. ' +
-    'Campos em branco ficam como no modelo da enfermaria.'
+    'Campos clínicos em branco ficam sem registro e geram aviso para preenchimento. Nenhuma prescrição é herdada do modelo.'
   );
   try {
     form.setEmailCollectionType(FormApp.EmailCollectionType.VERIFIED);
@@ -271,38 +287,28 @@ function criarFormulario() {
   var paginas = {};
   var ordem = Object.keys(CONFIG.MODELOS);
   ordem.forEach(function (chave) {
-    var rotulos = rotulosPrescricaoDoModelo(ids[chave]);
     paginas[chave] = form.addPageBreakItem()
       .setTitle('Prescrição – ' + CONFIG.MODELOS[chave].nome)
-      .setHelpText('Sem mexer em nada, sai a prescrição padrão da enfermaria inteira.');
+      .setHelpText('Informe os itens deste atendimento. Em branco = sem prescrição registrada. Revise indicação, dose, concentração, via e frequência.');
 
     guardar(form.addMultipleChoiceItem()
       .setTitle('Dieta')
       .setChoiceValues(dietasDoFormulario())
       .showOtherOption(true), chave + '.dieta');
-    if (rotulos[0] && rotulos[0].length) {
-      guardar(form.addCheckboxItem()
-        .setTitle('Itens padrão a NÃO usar hoje')
-        .setHelpText('Marque só o que deve SAIR. O que não for marcado fica na prescrição.')
-        .setChoiceValues(rotulos[0]), chave + '.remover');
-    }
+    guardar(configurarSelecaoPrescricao(form.addCheckboxItem(), chave), chave + '.incluir');
     guardar(form.addParagraphTextItem()
-      .setTitle('Medicações / itens adicionais')
-      .setHelpText('Um item por linha. Ex.: CEFTRIAXONA 1G EV 12/12H'), chave + '.adicionais');
+      .setTitle('Itens adicionais da prescrição')
+      .setHelpText('Um item completo por linha, individualizado pelo médico. Pediatria: exige idade/nascimento, peso e indicação.'), chave + '.adicionais');
 
     if (chave === 'PUERPERA') {
       guardar(form.addTextItem().setTitle('Prontuário do RN'), 'PUERPERA.prontuario_rn');
       guardar(form.addTextItem().setTitle('Registro do RN'), 'PUERPERA.registro_rn');
-      guardar(form.addTextItem().setTitle('Idade do RN'), 'PUERPERA.idade_rn');
+      guardar(form.addTextItem().setTitle('Idade do RN').setHelpText('Informe a unidade: por exemplo, 2 dias.'), 'PUERPERA.idade_rn');
       guardar(form.addTextItem().setTitle('Peso do RN (kg)'), 'PUERPERA.peso_rn');
-      if (rotulos[1] && rotulos[1].length) {
-        guardar(form.addCheckboxItem()
-          .setTitle('Itens padrão do RN a NÃO usar hoje')
-          .setHelpText('Marque só o que deve SAIR da prescrição do RN.')
-          .setChoiceValues(rotulos[1]), 'PUERPERA.remover_rn');
-      }
-      guardar(form.addParagraphTextItem().setTitle('Itens adicionais do RN').setHelpText('Um item por linha.'), 'PUERPERA.adicionais_rn');
-      guardar(form.addParagraphTextItem().setTitle('Exame do RN').setHelpText('Em branco = texto do modelo.'), 'PUERPERA.exame_rn');
+      guardar(form.addTextItem().setTitle('Indicação da prescrição do RN'), 'PUERPERA.indicacao_rn');
+      guardar(configurarSelecaoPrescricao(form.addCheckboxItem(), 'RN'), 'PUERPERA.incluir_rn');
+      guardar(form.addParagraphTextItem().setTitle('Itens adicionais da prescrição do RN').setHelpText('Um item completo por linha. Exige idade, peso e indicação do RN.'), 'PUERPERA.adicionais_rn');
+      guardar(form.addParagraphTextItem().setTitle('Exame do RN').setHelpText('Em branco = sem avaliação registrada; preencher.'), 'PUERPERA.exame_rn');
     }
   });
 
@@ -311,25 +317,27 @@ function criarFormulario() {
   guardar(form.addTextItem().setTitle('Nome completo do paciente').setRequired(true), 'nome');
   guardar(form.addTextItem().setTitle('Prontuário'), 'prontuario');
   guardar(form.addTextItem().setTitle('Registro'), 'registro');
-  guardar(form.addDateItem().setTitle('Data de nascimento'), 'data_nascimento');
-  guardar(form.addTextItem().setTitle('Idade'), 'idade');
+  guardar(form.addDateItem().setTitle('Data de nascimento').setIncludesYear(true), 'data_nascimento');
+  guardar(form.addTextItem().setTitle('Idade').setHelpText('Número em anos, meses ou dias; número sem unidade significa anos. Deve coincidir com nascimento na data do envio.'), 'idade');
   guardar(form.addTextItem().setTitle('Peso (kg)'), 'peso');
   guardar(form.addTextItem().setTitle('Leito'), 'leito');
-  guardar(form.addDateItem().setTitle('Data de admissão').setHelpText('Em branco = hoje.'), 'data_admissao');
+  guardar(form.addDateItem().setTitle('Data de admissão').setIncludesYear(true).setHelpText('Em branco = hoje. Confira o ano completo.'), 'data_admissao');
   guardar(form.addTextItem().setTitle('Hipótese diagnóstica'), 'hipotese');
 
   // Evolução
-  form.addPageBreakItem().setTitle('Evolução / exame físico').setHelpText('Campos em branco ficam com o texto do modelo.');
+  form.addPageBreakItem().setTitle('Evolução / exame físico').setHelpText('Campos vazios ficam sem registro; nenhum achado ou conduta é presumido.');
   guardar(form.addParagraphTextItem().setTitle('Relato de internação'), 'relato');
   guardar(form.addParagraphTextItem().setTitle('HPP'), 'hpp');
   guardar(form.addParagraphTextItem().setTitle('Evolução clínica'), 'evolucao');
-  guardar(form.addParagraphTextItem().setTitle('Exame físico').setHelpText('Em branco = exame físico padrão do modelo.'), 'exame_fisico');
-  guardar(form.addParagraphTextItem().setTitle('Conduta').setHelpText('Em branco = conduta do modelo.'), 'conduta');
-  guardar(form.addParagraphTextItem().setTitle('Solicitação de exames').setHelpText('Um exame por linha. Em branco = a do modelo.'), 'solicitacao');
+  guardar(form.addParagraphTextItem().setTitle('Exame físico').setHelpText('Em branco = sem avaliação registrada; preencher.'), 'exame_fisico');
+  guardar(form.addParagraphTextItem().setTitle('Conduta').setHelpText('Informe a decisão deste atendimento. Em branco = não informada; preencher.'), 'conduta');
+  guardar(form.addParagraphTextItem().setTitle('Solicitação de exames').setHelpText('Um exame por linha. Em branco = não informada.'), 'solicitacao');
 
   // Receita de alta da puérpera
   var alta = form.addPageBreakItem().setTitle('Receita de alta – puérpera');
   guardar(form.addTextItem().setTitle('Nome da puérpera').setRequired(true), 'alta.nome');
+  guardar(configurarSelecaoPrescricao(form.addCheckboxItem(), 'ALTA_PUERPERA'), 'alta.incluir');
+  guardar(form.addParagraphTextItem().setTitle('Prescrição de alta deste atendimento').setHelpText('Um item completo por linha. Em branco = sem prescrição registrada.'), 'alta.prescricao');
 
   // Navegação: o salto definido numa quebra de página vale para quem termina a seção ANTERIOR a ela.
   for (var i = 1; i < ordem.length; i++) paginas[ordem[i]].setGoToPage(identificacao);
@@ -357,20 +365,58 @@ function criarFormulario() {
   console.log('Planilha: ' + planilha.getUrl());
 }
 
-/** Atualiza as caixas "Itens padrão a NÃO usar hoje" a partir dos modelos do formulário. */
+/** Migra textos e campos sem excluir perguntas nem mudar seus IDs ou respostas existentes. */
 function atualizarFormulario() {
   var form = FormApp.openById(PROPS.getProperty('FORM_ID'));
-  var ids = idsModelosFormulario();
   var itens = lerJsonPropriedade('FORM_ITENS', {});
   var porChave = {};
   Object.keys(itens).forEach(function (id) { porChave[itens[id]] = Number(id); });
 
-  Object.keys(CONFIG.MODELOS).forEach(function (chave) {
-    var rotulos = rotulosPrescricaoDoModelo(ids[chave]);
-    [[chave + '.remover', rotulos[0]], ['PUERPERA.remover_rn', chave === 'PUERPERA' ? rotulos[1] : null]].forEach(function (par) {
-      if (!par[1] || !par[1].length || porChave[par[0]] === undefined) return;
-      form.getItemById(porChave[par[0]]).asCheckboxItem().setChoiceValues(par[1]);
-    });
+  form.setDescription('Campos clínicos vazios ficam sem registro e geram aviso. A prescrição contém somente os itens informados neste atendimento. Revisão e assinatura médica obrigatórias.');
+  Object.keys(porChave).forEach(function (chave) {
+    var item = form.getItemById(porChave[chave]);
+    if (/\.remover(?:_rn)?$/.test(chave)) {
+      item.asCheckboxItem().setTitle('Campo antigo — não utilizar').setHelpText('Ignorado: nenhum item padrão é prescrito.').setChoiceValues(['Nenhum item padrão será incluído']).setRequired(false).showOtherOption(false);
+    } else if (/\.incluir(?:_rn)?$/.test(chave)) {
+      configurarSelecaoPrescricao(item.asCheckboxItem(), chave === 'alta.incluir' ? 'ALTA_PUERPERA' : /_rn$/.test(chave) ? 'RN' : chave.split('.')[0]);
+    } else if (/\.dieta$/.test(chave)) item.asMultipleChoiceItem().setChoiceValues(dietasDoFormulario());
+    else if (/\.adicionais(?:_rn)?$/.test(chave)) {
+      item.asParagraphTextItem().setTitle(/_rn$/.test(chave) ? 'Itens adicionais da prescrição do RN' : 'Itens adicionais da prescrição')
+        .setHelpText('Um item completo por linha, individualizado pelo médico. Pediatria/RN: exige idade, peso e indicação.');
+    } else if (['exame_fisico','conduta','solicitacao','PUERPERA.exame_rn'].indexOf(chave) !== -1) {
+      item.asParagraphTextItem().setHelpText('Em branco = sem registro; preencher após avaliação.');
+    } else if (chave === 'data_admissao' || chave === 'data_nascimento') item.asDateItem().setIncludesYear(true).setHelpText('Confira dia, mês e ano completo.');
+    else if (chave === 'idade' || chave === 'PUERPERA.idade_rn') item.asTextItem().setHelpText('Número em anos, meses ou dias; sem unidade = anos.');
   });
-  console.log('Listas de itens padrão atualizadas.');
+  form.getItems(FormApp.ItemType.PAGE_BREAK).forEach(function (item) {
+    item.asPageBreakItem().setHelpText('Campos vazios ficam sem registro. Prescrições e decisões dependem da avaliação médica deste atendimento.');
+  });
+  function adicionarSeFaltar(chave, item, antesDe) {
+    itens[item.getId()] = chave;
+    if (antesDe && porChave[antesDe] !== undefined) form.moveItem(item.getIndex(), form.getItemById(porChave[antesDe]).getIndex());
+    porChave[chave] = item.getId();
+  }
+  if (porChave['PUERPERA.indicacao_rn'] === undefined) adicionarSeFaltar('PUERPERA.indicacao_rn', form.addTextItem().setTitle('Indicação da prescrição do RN'), 'PUERPERA.adicionais_rn');
+  if (porChave['alta.prescricao'] === undefined) adicionarSeFaltar('alta.prescricao', form.addParagraphTextItem().setTitle('Prescrição de alta deste atendimento').setHelpText('Um item completo por linha, individualizado pelo médico.'));
+  Object.keys(CONFIG.MODELOS).forEach(function (chave) {
+    if (porChave[chave + '.incluir'] === undefined) adicionarSeFaltar(chave + '.incluir', configurarSelecaoPrescricao(form.addCheckboxItem(), chave), chave + '.adicionais');
+  });
+  if (porChave['PUERPERA.incluir_rn'] === undefined) adicionarSeFaltar('PUERPERA.incluir_rn', configurarSelecaoPrescricao(form.addCheckboxItem(), 'RN'), 'PUERPERA.adicionais_rn');
+  if (porChave['alta.incluir'] === undefined) adicionarSeFaltar('alta.incluir', configurarSelecaoPrescricao(form.addCheckboxItem(), 'ALTA_PUERPERA'), 'alta.prescricao');
+
+  // As perguntas antigas ficam após uma seção que envia o formulário antes de exibi-las.
+  // IDs distintos impedem interpretar uma exclusão histórica como inclusão atual.
+  var antigas = Object.keys(porChave).filter(function (chave) { return /\.remover(?:_rn)?$/.test(chave); });
+  if (antigas.length) {
+    var idHistorico = PROPS.getProperty('FORM_SECAO_LEGADA');
+    var historico = idHistorico ? form.getItemById(Number(idHistorico)).asPageBreakItem() : form.addPageBreakItem().setTitle('Histórico do formulário — não preencher');
+    historico.setGoToPage(FormApp.PageNavigationType.SUBMIT);
+    PROPS.setProperty('FORM_SECAO_LEGADA', String(historico.getId()));
+    antigas.forEach(function (chave) {
+      var item = form.getItemById(porChave[chave]);
+      form.moveItem(item.getIndex(), form.getItems().length - 1);
+    });
+  }
+  PROPS.setProperty('FORM_ITENS', JSON.stringify(itens));
+  console.log('Formulário atualizado; IDs e respostas anteriores preservados.');
 }

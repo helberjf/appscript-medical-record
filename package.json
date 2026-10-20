@@ -4,7 +4,7 @@
   "private": true,
   "description": "Google Forms + Apps Script that turns a short form into a fully formatted hospital medical record (prescription, progress note and lab request) in Google Drive.",
   "scripts": {
-    "test": "node --test tests/regras.test.js",
+    "test": "node --test tests/*.test.js",
     "push": "clasp push",
     "open": "clasp open"
   },

@@ -72,13 +72,13 @@ test('linha de assinatura troca só a data', () => {
   assert.equal(marcar('ASSINATURA MÉDICA: ___________________ DATA: 17/10/2026'), 'ASSINATURA MÉDICA: ___________________ DATA: {{DATA}}');
 });
 
-test('textos livres guardam o padrão do modelo', () => {
+test('textos livres nunca guardam achados clínicos como padrão', () => {
   const hpp = ctx.marcarTexto('HPP : PREVIAMENTE HÍGIDO');
   assert.equal(hpp.texto, 'HPP : {{HPP}}');
-  assert.equal(hpp.padroes.HPP, 'PREVIAMENTE HÍGIDO');
+  assert.equal(hpp.padroes.HPP, undefined);
   const evo = ctx.marcarTexto('EVOLUÇÃO CLÍNICA:  ADMISSÃO HOSPITALAR');
   assert.equal(evo.texto, 'EVOLUÇÃO CLÍNICA:  {{EVOLUCAO}}');
-  assert.equal(evo.padroes.EVOLUCAO, 'ADMISSÃO HOSPITALAR');
+  assert.equal(evo.padroes.EVOLUCAO, undefined);
   assert.equal(marcar('RELATO DE INTERNAÇÃO : '), 'RELATO DE INTERNAÇÃO : {{RELATO}}');
   assert.equal(marcar('RELATO DE INTERNAÇÃO: Pacinete gestante G1A0P0, expulsa RN'), 'RELATO DE INTERNAÇÃO: {{RELATO}}');
   assert.equal(marcar('RELATO DE INTERNAÇÃO : HPP'), 'RELATO DE INTERNAÇÃO : {{RELATO}}     HPP: {{HPP}}');
@@ -92,7 +92,6 @@ test('linhas que não são rótulos ficam iguais', () => {
     'EXAME FÍSICO',
     'EVOLUÇÃO / EXAME FÍSICO',
     'SOLICITAÇÃO DE EXAMES:',
-    'Apagamento: Total // Idade Gestacional: 39+2 // História Gestacional: G1A0P0',
     'Rua Exemplo, 123, Centro - MG',
   ]) {
     assert.equal(marcar(linha), linha);
@@ -118,13 +117,14 @@ const padraoMasculina = [
 
 const resumo = (entradas) => Array.from(entradas).map((e) => (e.tipo === 'padrao' ? e.indice : e.texto));
 
-test('sem mexer em nada sai a prescrição padrão inteira', () => {
-  assert.deepEqual(resumo(ctx.montarPrescricao(padraoMasculina, [], 'Manter a do modelo', '')), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+test('sem informar itens a prescrição permanece vazia, mesmo com modelo antigo', () => {
+  assert.deepEqual(resumo(ctx.montarPrescricao(padraoMasculina, [], 'Manter a do modelo', '')), []);
+  assert.deepEqual(resumo(ctx.montarPrescricao(padraoMasculina, [], 'Sem dieta informada', '')), []);
 });
 
 test('exemplo do plano: tira ondansetrona, dieta zero e dois adicionais', () => {
   const entradas = ctx.montarPrescricao(padraoMasculina, ['ONDANSETRONA'], 'DIETA ZERO', '1- ceftriaxona 1g ev 12/12h\n\n- omeprazol 40mg ev 1x/dia\n');
-  assert.deepEqual(resumo(entradas), ['DIETA ZERO', 1, 2, 3, 4, 5, 6, 7, 8, 9, 'CEFTRIAXONA 1G EV 12/12H', 'OMEPRAZOL 40MG EV 1X/DIA']);
+  assert.deepEqual(resumo(entradas), ['DIETA ZERO', 'CEFTRIAXONA 1G EV 12/12H', 'OMEPRAZOL 40MG EV 1X/DIA']);
 });
 
 test('dieta digitada em "Outra" sem a palavra DIETA', () => {
@@ -143,4 +143,84 @@ test('datas', () => {
   assert.equal(ctx.diasEntre('19/10/2026', '19/10/2026'), '0');
   assert.equal(ctx.diasEntre('', '19/10/2026'), '');
   assert.equal(ctx.normalizarNome('  mária  Silva '), 'MARIA SILVA');
+});
+
+test('achados obstétricos antigos são retirados, preservando os rótulos', () => {
+  for (const linha of [
+    'Dilatação: 10 cm // BCF: 140 bpm // Dinâmica uterina: 3/10',
+    'Apagamento: Total // Idade Gestacional: 39+2 // História Gestacional: G1A0P0',
+    'IG: 39 semanas e 2 dias; DU: presente; Toque vaginal: dilatação total',
+  ]) {
+    const limpa = ctx.limparLinhaObstetrica(linha);
+    assert.doesNotMatch(limpa, /10 cm|140 bpm|3\/10|Total|39\+2|G1A0P0|39 semanas|presente|dilatação total/i);
+    assert.match(limpa, /NÃO INFORMADO/);
+  }
+});
+
+test('validação rejeita datas inexistentes, futuras, admissão em 1900 e anterior ao nascimento', () => {
+  for (const r of [
+    { data_admissao: '1900-01-01' }, { data_admissao: '2026-02-31' },
+    { data_nascimento: '2027-01-01' }, { data_admissao: '2026-10-21' },
+    { data_nascimento: '2026-10-19', data_admissao: '2026-10-18' },
+    { data_nascimento: '01/01/2000', idade: '40 anos' },
+    { idade: '-2' }, { idade: 'dois anos' }, { peso: '0' },
+  ]) assert.throws(() => ctx.validarDadosResposta(r, '20/10/2026', 'MASCULINA'), /./);
+});
+
+test('validação respeita aniversário, meses e dias, sem tratar bebês como adultos', () => {
+  for (const r of [
+    { data_nascimento: '2000-10-21', idade: '25 anos' },
+    { data_nascimento: '2026-08-20', idade: '2 meses' },
+    { data_nascimento: '2026-10-19', idade: '1 dia' },
+    { data_nascimento: '2000-02-29', idade: '26' },
+    { data_nascimento: '2026-10-20', idade: '0 dias', peso: '3,2' },
+  ]) assert.doesNotThrow(() => ctx.validarDadosResposta(r, '20/10/2026', 'PEDIATRIA'));
+  assert.throws(() => ctx.validarDadosResposta({data_nascimento:'2026-08-20', idade:'3 meses'}, '20/10/2026', 'PEDIATRIA'), /idade/i);
+});
+
+test('prescrição pediátrica exige idade, peso e indicação por atendimento', () => {
+  const completa = {idade:'2 anos', peso:'12,5', hipotese:'Indicação informada pelo médico', 'PEDIATRIA.adicionais':'Item informado pelo médico'};
+  assert.doesNotThrow(() => ctx.validarDadosResposta(completa, '20/10/2026', 'PEDIATRIA'));
+  for (const chave of ['idade', 'peso', 'hipotese']) {
+    assert.throws(() => ctx.validarDadosResposta({...completa, [chave]:''}, '20/10/2026', 'PEDIATRIA'), /pediátrica/i);
+  }
+  assert.throws(() => ctx.validarDadosResposta({'PUERPERA.adicionais_rn':'Item do RN'}, '20/10/2026', 'PUERPERA'), /RN/);
+});
+
+const catalogoSelecao = [
+  {texto:'ITEM A REVISADO', revisado:true},
+  {texto:'ITEM B REVISADO', revisado:true},
+  {texto:'ITEM ANTIGO SEM REVISÃO', revisado:false},
+];
+
+test('seleção positiva inclui somente os itens escolhidos e nunca inclui os demais', () => {
+  assert.deepEqual(resumo(ctx.montarPrescricaoSelecionada(catalogoSelecao,['ITEM B REVISADO'],'','')),['ITEM B REVISADO']);
+  assert.deepEqual(resumo(ctx.montarPrescricaoSelecionada(catalogoSelecao,[],'','')),[]);
+});
+
+test('seleção múltipla mantém dieta e adicionais sem duplicar itens selecionados', () => {
+  const itens=ctx.montarPrescricaoSelecionada(catalogoSelecao,['ITEM B REVISADO','ITEM A REVISADO','ITEM B REVISADO'],'DIETA ZERO','Item adicional');
+  assert.deepEqual(resumo(itens),['DIETA ZERO','ITEM A REVISADO','ITEM B REVISADO','ITEM ADICIONAL']);
+});
+
+test('opção desconhecida ou não revisada não pode entrar pela seleção', () => {
+  assert.throws(()=>ctx.montarPrescricaoSelecionada(catalogoSelecao,['ITEM ANTIGO SEM REVISÃO'],'',''),/opção|revis/i);
+  assert.throws(()=>ctx.montarPrescricaoSelecionada(catalogoSelecao,['OPÇÃO REMOVIDA'],'',''),/opção|revis/i);
+  assert.throws(()=>ctx.montarPrescricaoSelecionada(catalogoSelecao,'ITEM A REVISADO','',''),/seleção/i);
+});
+
+test('catálogo sem opções não gera prescrição ao selecionar o aviso de indisponibilidade', () => {
+  assert.deepEqual(resumo(ctx.montarPrescricaoSelecionada([],[ctx.SEM_OPCOES_PRESCRICAO],'','')),[]);
+});
+
+test('seleções pediátricas e do RN exigem os mesmos dados dos itens digitados', () => {
+  assert.throws(()=>ctx.validarDadosResposta({'PEDIATRIA.incluir':['ITEM A REVISADO']},'20/10/2026','PEDIATRIA'),/pediátrica/i);
+  assert.throws(()=>ctx.validarDadosResposta({'PUERPERA.incluir_rn':['ITEM A REVISADO']},'20/10/2026','PUERPERA'),/RN/);
+});
+
+test('opções iniciais de registro não afirmam revisão médica nem liberam medicamentos', () => {
+  const opcoes=[{texto:'REGISTRAR SINAIS VITAIS',tipo:'registro'},{texto:'MEDICAMENTO COM DOSE FIXA',tipo:'registro'}];
+  assert.deepEqual(resumo(ctx.montarPrescricaoSelecionada(opcoes,['REGISTRAR SINAIS VITAIS'],'','')),['REGISTRAR SINAIS VITAIS']);
+  assert.throws(()=>ctx.montarPrescricaoSelecionada(opcoes,['MEDICAMENTO COM DOSE FIXA'],'',''),/opção|revis/i);
+  assert.doesNotThrow(()=>ctx.validarDadosResposta({'PEDIATRIA.incluir':['REGISTRAR SINAIS VITAIS']},'20/10/2026','PEDIATRIA'));
 });

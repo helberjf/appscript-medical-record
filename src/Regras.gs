@@ -70,7 +70,7 @@ var RE_DATA_CABECALHO = /^\s*DATA\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})?\s*$/i;
 
 /**
  * Rótulos de uma linha inteira: "re" casa o rótulo, que fica; o resto da linha é o valor, que vira o marcador.
- * "sufixo": usa _RN na tabela do RN. "padrao": guarda o valor do modelo para quando o campo vier vazio.
+ * "sufixo": usa _RN na tabela do RN. Valores clínicos antigos nunca viram padrões.
  * "rotulo": troca também o rótulo (só no "IDAde" da pediatria). "depois": texto depois do marcador.
  */
 var REGRAS_LINHA = [
@@ -84,9 +84,9 @@ var REGRAS_LINHA = [
   { re: /^[-–—\\\s]*NOME\s+DO\s+PACIENTE\s*:?[ \t]*$/i, chave: 'NOME' },
   { re: /^[-–—\\\s]*NOME\s*:?[ \t]*$/i, chave: 'NOME' },
   { re: /^\s*RELATO\s+DE\s+INTERNA[ÇC][ÃA]O\s*:?[ \t]*/i, chave: 'RELATO' },
-  { re: /^\s*HPP\s*:?[ \t]*/i, chave: 'HPP', padrao: true },
-  { re: /^\s*EVOLU[ÇC][ÃA]O\s+CL[ÍI]NICA\s*:?[ \t]*/i, chave: 'EVOLUCAO', padrao: true },
-  { re: /^\s*EXAME\s+(?:DO\s+)?RN\s*:?[ \t]*/i, chave: 'EXAME_RN', padrao: true },
+  { re: /^\s*HPP\s*:?[ \t]*/i, chave: 'HPP' },
+  { re: /^\s*EVOLU[ÇC][ÃA]O\s+CL[ÍI]NICA\s*:?[ \t]*/i, chave: 'EVOLUCAO' },
+  { re: /^\s*EXAME\s+(?:DO\s+)?RN\s*:?[ \t]*/i, chave: 'EXAME_RN' },
 ];
 
 /** Rótulos que aparecem juntos na caixa da evolução, às vezes sem dois-pontos e com data ou número de exemplo. */
@@ -142,7 +142,6 @@ function marcarTexto(texto, sufixo) {
     if (!m) continue;
     var marcador = '{{' + regra.chave + (regra.sufixo ? sufixo : '') + '}}';
     var valor = original.slice(m[0].length);
-    if (regra.padrao) padroes[regra.chave] = valor.trim();
     if (regra.rotulo) {
       edicoes.push({ inicio: 0, fim: original.length, texto: regra.rotulo + marcador + (regra.depois || '') });
       return pronto();
@@ -225,10 +224,13 @@ function rotulosUnicos(rotulos) {
 }
 
 var MANTER_DIETA = 'Manter a do modelo';
+var SEM_DIETA = 'Sem dieta informada';
+var SEM_OPCOES_PRESCRICAO = 'Nenhuma opção liberada — use o campo de itens adicionais';
+var OPCOES_REGISTRO = ['CONFERIR E REGISTRAR ALERGIAS', 'REGISTRAR SINAIS VITAIS', 'REGISTRAR REAVALIAÇÃO MÉDICA', 'REGISTRAR PESO DO RN', 'REGISTRAR ORIENTAÇÕES MÉDICAS DE ALTA'];
 
 function normalizarDieta(dieta) {
   var texto = String(dieta || '').replace(/\s+/g, ' ').trim();
-  if (!texto || texto === MANTER_DIETA) return '';
+  if (!texto || texto === MANTER_DIETA || texto === SEM_DIETA) return '';
   texto = texto.toUpperCase();
   return /^DIETA\b/.test(texto) ? texto : 'DIETA ' + texto;
 }
@@ -243,33 +245,120 @@ function normalizarItemAdicional(linha) {
 }
 
 /**
- * Monta a prescrição final.
- * itensPadrao: [{ indice, rotulo, ehDieta }] na ordem do modelo (rotulo já único).
- * removidos: rótulos marcados em "Itens padrão a NÃO usar hoje".
- * Devolve [{ tipo: 'padrao', indice, rotulo } | { tipo: 'texto', texto }] sem buracos.
+ * Somente dieta e itens informados neste atendimento. Os dois primeiros argumentos
+ * continuam aceitos para compatibilidade com formulários antigos, mas nunca autorizam padrões.
  */
 function montarPrescricao(itensPadrao, removidos, dieta, adicionais) {
-  var tirar = {};
-  (removidos || []).forEach(function (rotulo) { tirar[String(rotulo).toUpperCase()] = true; });
   var novaDieta = normalizarDieta(dieta);
-  var dietaUsada = false;
   var entradas = [];
-
-  itensPadrao.forEach(function (item) {
-    if (item.ehDieta && novaDieta && !dietaUsada) {
-      entradas.push({ tipo: 'texto', texto: novaDieta });
-      dietaUsada = true;
-      return;
-    }
-    if (tirar[item.rotulo.toUpperCase()]) return;
-    entradas.push({ tipo: 'padrao', indice: item.indice, rotulo: item.rotulo });
-  });
-
-  if (novaDieta && !dietaUsada) entradas.unshift({ tipo: 'texto', texto: novaDieta });
+  if (novaDieta) entradas.push({ tipo: 'texto', texto: novaDieta });
 
   dividirLinhas(adicionais).forEach(function (linha) {
     var texto = normalizarItemAdicional(linha);
     if (texto) entradas.push({ tipo: 'texto', texto: texto });
   });
   return entradas;
+}
+
+/** Somente opções explicitamente liberadas após revisão médica podem ser selecionadas. */
+function itensRevisadosPrescricao(catalogo) {
+  return (catalogo || []).filter(function (item) {
+    return item && (item.revisado === true || (item.tipo === 'registro' && OPCOES_REGISTRO.indexOf(String(item.texto || '').trim()) !== -1)) && String(item.texto || '').trim();
+  }).map(function (item) { return String(item.texto).trim(); });
+}
+
+/** Lista positiva: não selecionar nada nunca autoriza itens do catálogo. */
+function montarPrescricaoSelecionada(catalogo, selecionados, dieta, adicionais) {
+  selecionados = selecionados || [];
+  if (!Array.isArray(selecionados)) throw new Error('Seleção de prescrição inválida.');
+  var disponiveis = itensRevisadosPrescricao(catalogo);
+  selecionados.forEach(function (item) {
+    if (item !== SEM_OPCOES_PRESCRICAO && disponiveis.indexOf(item) === -1) {
+      throw new Error('Opção de prescrição não revisada ou alterada. Atualize o formulário e selecione novamente.');
+    }
+  });
+  var entradas = montarPrescricao([], [], dieta, '');
+  disponiveis.filter(function (item, i) {
+    return selecionados.indexOf(item) !== -1 && disponiveis.indexOf(item) === i;
+  }).forEach(function (item) { entradas.push({tipo:'texto', texto:item}); });
+  return entradas.concat(montarPrescricao([], [], '', adicionais));
+}
+
+function haSelecaoPrescricao(valor) {
+  return Array.isArray(valor) && valor.some(function (item) { return item !== SEM_OPCOES_PRESCRICAO && OPCOES_REGISTRO.indexOf(item) === -1; });
+}
+
+/** Remove os valores de linhas obstétricas identificadas, inclusive vários rótulos na mesma linha. */
+function limparLinhaObstetrica(texto) {
+  var original = String(texto || '');
+  var re = /\b(Dilata[çc][ãa]o|Apagamento|Idade\s+Gestacional|Hist[óo]ria\s+Gestacional|BCF|Din[âa]mica\s+Uterina|Toque\s+Vaginal|IG|DU)\s*[:=]\s*/gi;
+  var achados = [], m;
+  while ((m = re.exec(original))) achados.push({inicio: re.lastIndex, rotulo: m.index});
+  var edicoes = achados.map(function (a, i) {
+    var fim = i + 1 < achados.length ? achados[i + 1].rotulo : original.length;
+    var separador = original.slice(a.inicio, fim).match(/\s*(?:\/\/|;)\s*$/);
+    return {inicio: a.inicio, fim: fim, texto: 'NÃO INFORMADO — PREENCHER' + (separador ? separador[0] : (i + 1 < achados.length ? ' ' : ''))};
+  });
+  return aplicarEdicoes(original, edicoes);
+}
+
+/** Datas ISO ou brasileiras com ano completo; não aceita o ajuste automático de 31/02 do Date. */
+function dataRespostaUtc(valor) {
+  var texto = formatarDataResposta(valor);
+  var m = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  var dia = Number(m[1]), mes = Number(m[2]), ano = Number(m[3]);
+  if (ano < 1000) return null;
+  var data = new Date(Date.UTC(ano, mes - 1, dia));
+  return data.getUTCFullYear() === ano && data.getUTCMonth() === mes - 1 && data.getUTCDate() === dia ? data : null;
+}
+
+function lerIdade(valor) {
+  var m = String(valor || '').trim().toLowerCase().match(/^(\d+)\s*(anos?|a|mes(?:es)?|m|dias?|d)?$/);
+  if (!m) return null;
+  return {valor: Number(m[1]), unidade: !m[2] || /^a/.test(m[2]) ? 'anos' : /^m/.test(m[2]) ? 'meses' : 'dias'};
+}
+
+function idadeNaData(nascimento, hoje, unidade) {
+  if (unidade === 'dias') return Math.floor((hoje - nascimento) / 86400000);
+  var meses = (hoje.getUTCFullYear() - nascimento.getUTCFullYear()) * 12 + hoje.getUTCMonth() - nascimento.getUTCMonth();
+  if (hoje.getUTCDate() < nascimento.getUTCDate()) meses--;
+  return unidade === 'meses' ? meses : Math.floor(meses / 12);
+}
+
+function pesoValido(valor) {
+  var texto = String(valor || '').trim().replace(',', '.');
+  return /^\d+(?:\.\d+)?$/.test(texto) && Number(texto) > 0;
+}
+
+/** Bloqueia dados contraditórios antes de criar qualquer documento. Não valida indicação ou dose clínica. */
+function validarDadosResposta(r, hojeBr, modelo, anoMinimoAdmissao) {
+  var hoje = dataRespostaUtc(hojeBr);
+  if (!hoje) throw new Error('Data de referência inválida.');
+  var admissao = dataRespostaUtc(r.data_admissao || hojeBr);
+  var nascimento = r.data_nascimento ? dataRespostaUtc(r.data_nascimento) : null;
+  if (!admissao || admissao.getUTCFullYear() < (anoMinimoAdmissao || 2000) || admissao > hoje) {
+    throw new Error('Data de admissão inválida, antiga ou futura; corrija o ano e a data.');
+  }
+  if (r.data_nascimento && (!nascimento || nascimento > hoje || nascimento > admissao)) {
+    throw new Error('Data de nascimento inválida ou posterior à admissão/envio.');
+  }
+  var idade = r.idade ? lerIdade(r.idade) : null;
+  if (r.idade && !idade) throw new Error('Idade inválida. Informe um número em anos, meses ou dias.');
+  if (idade && nascimento && idade.valor !== idadeNaData(nascimento, hoje, idade.unidade)) {
+    throw new Error('Idade incompatível com a data de nascimento na data do envio.');
+  }
+  ['peso', 'PUERPERA.peso_rn'].forEach(function (chave) {
+    if (r[chave] && !pesoValido(r[chave])) throw new Error('Peso inválido; informe um número positivo em kg.');
+  });
+  var idadeRn = r['PUERPERA.idade_rn'];
+  if (idadeRn && !lerIdade(idadeRn)) throw new Error('Idade do RN inválida; informe anos, meses ou dias.');
+  if (modelo === 'PEDIATRIA' && (dividirLinhas(r['PEDIATRIA.adicionais']).length || haSelecaoPrescricao(r['PEDIATRIA.incluir'])) &&
+      (!(idade || nascimento) || !pesoValido(r.peso) || !String(r.hipotese || '').trim())) {
+    throw new Error('Prescrição pediátrica exige idade/nascimento, peso e indicação neste atendimento.');
+  }
+  if (modelo === 'PUERPERA' && (dividirLinhas(r['PUERPERA.adicionais_rn']).length || haSelecaoPrescricao(r['PUERPERA.incluir_rn'])) &&
+      (!lerIdade(idadeRn) || !pesoValido(r['PUERPERA.peso_rn']) || !String(r['PUERPERA.indicacao_rn'] || '').trim())) {
+    throw new Error('Prescrição do RN exige idade, peso e indicação do RN neste atendimento.');
+  }
 }

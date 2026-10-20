@@ -20,7 +20,7 @@ var CONFIG = {
     PUERPERA: { nome: 'Puérpera (mãe e RN)', docxId: 'PASTE_POSTPARTUM_TEMPLATE_DOCX_ID' },
   },
 
-  // Google Doc da receita de alta da puérpera (só é copiado, nunca alterado).
+  // ID legado, preservado para compatibilidade de configuração. A receita agora usa somente itens digitados.
   RECEITA_ALTA_PUERPERA_ID: 'PASTE_POSTPARTUM_DISCHARGE_GOOGLE_DOC_ID',
 
   // Opções da pergunta "Enfermaria" do Form: para qual pasta vai e qual modelo usa.
@@ -50,16 +50,37 @@ var CONFIG = {
   // true = manda para o médico um e-mail com o link do documento criado.
   ENVIAR_EMAIL: true,
 
+  // Validação de ano de admissão; ajuste apenas se houver internações anteriores legítimas.
+  ANO_MINIMO_ADMISSAO: 2000,
+
+  // A seleção começa com lembretes de registro, sem medicamentos ou doses.
+  // Acrescente itens clínicos SOMENTE após revisão médica dos itens completos.
+  // Formato de cada opção: { texto: 'ITEM COMPLETO REVISADO PELO MÉDICO', revisado: true }.
+  // Nada é selecionado por padrão. Não importar as doses antigas sem revisão/individualização.
+  OPCOES_PRESCRICAO: opcoesRegistroPadrao(),
+
   FUSO: 'America/Sao_Paulo',
   NOME_PASTA_MODELOS: '_MODELOS DO FORMULÁRIO (não apagar)',
   NOME_PASTA_TESTES: '_TESTES DO FORMULÁRIO',
   TITULO_FORMULARIO: 'Prontuário – Hospital',
 };
 
+/** Opções iniciais de documentação; não contêm medicamentos, doses ou decisões de alta. */
+function opcoesRegistroPadrao() {
+  function registros(textos) { return textos.map(function (texto) { return {texto:texto, tipo:'registro'}; }); }
+  var comuns = ['CONFERIR E REGISTRAR ALERGIAS', 'REGISTRAR SINAIS VITAIS', 'REGISTRAR REAVALIAÇÃO MÉDICA'];
+  return {
+    MASCULINA: registros(comuns), FEMININA: registros(comuns), PSIQUIATRIA: registros(comuns),
+    PEDIATRIA: registros(comuns), PUERPERA: registros(comuns),
+    RN: registros(['REGISTRAR SINAIS VITAIS', 'REGISTRAR PESO DO RN']),
+    ALTA_PUERPERA: registros(['REGISTRAR ORIENTAÇÕES MÉDICAS DE ALTA']),
+  };
+}
+
 // Função (e não variável) porque o Apps Script não garante a ordem em que carrega os arquivos.
 function dietasDoFormulario() {
   return [
-    MANTER_DIETA,
+    SEM_DIETA,
     'DIETA ZERO',
     'DIETA ORAL LIVRE',
     'DIETA BRANDA',
