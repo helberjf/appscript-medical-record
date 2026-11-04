@@ -18,7 +18,7 @@ This project replaces that with a **Google Form + Google Apps Script**. The doct
 | 💊 **Prescription per encounter** | Starts empty. The doctor selects the items to include from a medically reviewed list and can type additional items. Only selected items, explicit diet and additions are transferred. Pediatric/newborn entries require age, positive weight and indication. The script does not calculate or validate clinical doses. |
 | 🎨 **Keeps the hospital's formatting** | Only the *values* are written into the template, never the labels. Fonts (Archivo Black, Kanit), sizes, bold and spacing stay as in the original Word file. This was checked by comparing the `.docx` XML of a generated record with a real one. |
 | 📂 **Finds or creates the patient folder** | Folder names are matched ignoring case, accents and extra spaces (`" Maria  Silva"` matches `MARIA SILVA`). |
-| 🛡️ **Never deletes anything** | The script only *creates* files and folders. It never trashes, renames or overwrites. If a file name already exists, the new one gets ` (2)`. The original `.docx` templates are only read. |
+| 📂 **Preserves source templates** | Record generation copies templates and creates output files. A duplicate output name receives a numeric suffix. Form migration is a separate, explicit operation described in the update guide. |
 | 🔐 **Access control** | The form collects verified Google e-mails, and only addresses in `ALLOWED_EMAILS` can generate documents. |
 | 🧪 **Test mode** | With `MODO_TESTE = true`, everything goes to a `_TESTES DO FORMULÁRIO` folder, so it can be tried safely with real templates. |
 | 📬 **Traceability** | The `Processamento` sheet records attempts, ignored responses, errors, partial file IDs and success by response ID. `Documentos gerados` lists completed records. Email/export failures have their own states. |
@@ -92,14 +92,17 @@ src/
 ├── Documento.gs      # Google Docs helpers: style-preserving edits, tables, blocks
 ├── Setup.gs          # one-time: create templates, build the form, refresh choices
 ├── Preencher.gs      # form-submit trigger: folder, copy, fill, log, e-mail
-└── Rastreio.gs       # response/file audit and reconciliation report
+├── Rastreio.gs       # response/file audit and reconciliation report
+└── Atualizacao.gs    # existing-form migration and verification
 tests/
-└── regras.test.js    # node:test suite for Regras.gs (loaded with node:vm)
+└── *.test.js         # rules, documents, forms, processing and reconciliation
 ```
 
 ---
 
 ## 🚀 Setup
+
+Local tests require Node.js 18 or later, as declared in `package.json`. Deployment requires a Google account with access to the target Apps Script project, templates and folders.
 
 ### Option A: with [clasp](https://github.com/google/clasp)
 
@@ -155,11 +158,19 @@ Tests use small doubles for the public Google APIs. They do not establish that t
 
 ## 🔒 Privacy
 
-This repository holds **only code**: no patient data, no real Drive IDs, no e-mails. All IDs in `Config.gs` are placeholders. The test fixtures use made-up names.
+Configure real Drive IDs and authorized addresses only in the private installation. Use fictional patient details for demonstrations and tests; do not add patient records or exported clinical documents to the repository.
 
-The generated records stay in the hospital's own Google Drive. The script needs no external services.
+The generated records stay in the hospital's Google Drive. The workflow uses Google Workspace services rather than a separate third-party application backend.
 
 ---
+
+## Design tradeoffs
+
+- **Apps Script inside Google Workspace:** Forms, Drive and Docs integrate without a separate application server, while execution quotas, authorization scopes and trigger behavior remain tied to the Google environment.
+- **Style-preserving template edits:** editing values and clinical blocks retains the hospital layout, but variable labels and table structures require explicit rules and visual checks against each template version.
+- **Empty-by-default clinical content:** explicit selections reduce carryover from old records; clinicians must supply and review the current encounter content. The code does not calculate or validate medication doses.
+- **Separate processing and reconciliation logs:** response IDs, partial outputs and error states make failures inspectable, at the cost of extra bookkeeping. An email failure and a missing generated document are different outcomes.
+- **Node tests with Google API doubles:** pure rules and failure paths can be checked locally without patient data; real authorization, triggers and document rendering still require test-mode verification in the target project.
 
 ## 🛠️ Tech
 
